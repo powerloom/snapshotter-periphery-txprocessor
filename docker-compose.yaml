@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  tx_processor:
+    build: .
+    container_name: tx_processor_service
+    # Explicitly list required environment variables
+    environment:
+      - RPC_URL
+      - RPC_RETRY
+      - RPC_TIMEOUT
+      - REDIS_HOST
+      - REDIS_PORT
+      - REDIS_DB
+      - REDIS_PASSWORD
+      - REDIS_SSL
+      - REDIS_CLUSTER
+      - LOG_DEBUG
+      - LOG_TO_FILES
+      - LOG_LEVEL
+      - PROCESSOR_QUEUE_KEY
+      - PROCESSOR_BLOCK_TIMEOUT
+    # Use env_file to load variables from .env
+    env_file:
+      - .env
+    # Mount logs directory for persistence/viewing
+    volumes:
+      - ./logs:/app/logs
+    # Depend on redis if using the local profile
+    depends_on:
+      - redis_tx # Renamed to avoid conflict if run with BlockFetcher compose
+    # Restart policy
+    restart: unless-stopped
+
+  # Redis service specific to txprocessor, using a local profile
+  redis_tx:
+    image: redis:7-alpine
+    container_name: redis_txprocessor
+    # Use password from .env if REDIS_PASSWORD is set
+    # Note: The command should ideally reference the ENV VAR like this:
+    command: >
+      sh -c "redis-server --requirepass \"$${REDIS_PASSWORD?No Redis Password Set}\""
+    ports:
+      # Use host port from .env or default 6379
+      - "${REDIS_PORT:-6379}:6379"
+    profiles:
+      - local # Only run this redis instance when 'local' profile is active
+    restart: unless-stopped
