@@ -1,4 +1,5 @@
 {
+  "namespace": "${NAMESPACE}",
   "rpc": {
     "url": "${RPC_URL}",
     "retry": "${RPC_RETRY}",

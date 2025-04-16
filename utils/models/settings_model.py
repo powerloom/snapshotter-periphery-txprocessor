@@ -34,3 +34,4 @@ class Settings(BaseModel):
     redis: Redis
     logs: Logs
     processor: TxProcessorConfig
+    namespace: str

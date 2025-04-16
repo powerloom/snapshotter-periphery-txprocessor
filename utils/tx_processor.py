@@ -1,18 +1,21 @@
 import asyncio
-import redis.asyncio as aioredis
-from config.loader import get_core_config # Adjusted import path
+import redis.exceptions
+from redis import asyncio as aioredis
 from utils.models.settings_model import Settings
 from utils.redis_conn import RedisPool
 from utils.rpc import RpcHelper
 from utils.logging import logger
+from utils.redis_keys import block_tx_htable_key
+import json
 
 class TxProcessor:
+    _redis: aioredis.Redis
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.rpc_helper = RpcHelper(settings.rpc)
-        self._redis: aioredis.Redis = None
         self._logger = logger.bind(module='TxProcessor')
-        self.queue_key = settings.processor.redis_queue_key
+        self.queue_key = f'{settings.processor.redis_queue_key}:{settings.namespace}'
         self.block_timeout = settings.processor.redis_block_timeout
 
     async def _init(self):
@@ -28,16 +31,16 @@ class TxProcessor:
     async def process_transaction(self, tx_hash: str):
         """Fetch receipt for a single transaction hash."""
         self._logger.info(f"🔍 Processing transaction hash: {tx_hash}")
-        # just mocking the processing, so we return from here
-        return
         try:
             receipt = await self.rpc_helper.get_transaction_receipt(tx_hash)
             if receipt:
                 self._logger.success(f"✅ Successfully fetched receipt for {tx_hash}")
-                # --- TODO: Add logic to handle the receipt ---
-                # Example: Store it, push to another queue, etc.
-                # print(receipt) # Placeholder
-                # ---------------------------------------------
+                # Store the full receipt as JSON in the hashtable
+                await self._redis.hset(
+                    block_tx_htable_key(self.settings.namespace, receipt['blockNumber']),
+                    tx_hash,
+                    json.dumps(receipt)
+                )
             else:
                 # This could be normal if the tx hasn't been mined yet or is invalid
                 self._logger.warning(f"⚠️ No receipt found for {tx_hash} (might be pending or invalid)")
@@ -54,7 +57,6 @@ class TxProcessor:
             try:
                 # Blocking right pop from the list
                 result = await self._redis.brpop(self.queue_key, timeout=self.block_timeout)
-
                 if result:
                     _queue_name, tx_hash_bytes = result
                     tx_hash = tx_hash_bytes # Already decoded if decode_responses=True in RedisPool

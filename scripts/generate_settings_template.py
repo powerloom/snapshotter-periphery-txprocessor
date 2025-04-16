@@ -5,6 +5,7 @@ import os
 def generate_template():
     """Generate template settings.json with placeholder values"""
     template = {
+        "namespace": "${NAMESPACE}",
         "rpc": {
             "url": "${RPC_URL}",
             "retry": "${RPC_RETRY}",
