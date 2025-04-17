@@ -20,31 +20,9 @@ def fill_template():
     with open(TEMPLATE_FILE, 'r') as f:
         template = Template(f.read())
 
-    # Prepare dictionary with defaults for substitution
-    # Ensures all expected keys exist, even if ENV VAR is missing
-    env_with_defaults = {
-        "RPC_URL": os.getenv("RPC_URL", "http://localhost:8545"),
-        "RPC_RETRY": os.getenv("RPC_RETRY", "3"),
-        "RPC_TIMEOUT": os.getenv("RPC_TIMEOUT", "15"),
-        "REDIS_HOST": os.getenv("REDIS_HOST", "localhost"),
-        "REDIS_PORT": os.getenv("REDIS_PORT", "6379"),
-        "REDIS_DB": os.getenv("REDIS_DB", "0"),
-        "REDIS_PASSWORD": os.getenv("REDIS_PASSWORD", ""), # Empty string if not set
-        "REDIS_SSL": os.getenv("REDIS_SSL", "false"),
-        "REDIS_CLUSTER": os.getenv("REDIS_CLUSTER", "false"),
-        "LOG_DEBUG": os.getenv("LOG_DEBUG", "false"),
-        "LOG_TO_FILES": os.getenv("LOG_TO_FILES", "true"),
-        "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
-        "PROCESSOR_QUEUE_KEY": os.getenv("PROCESSOR_QUEUE_KEY", "pending_transactions"),
-        "PROCESSOR_BLOCK_TIMEOUT": os.getenv("PROCESSOR_BLOCK_TIMEOUT", "0")
-        # Add any other env vars needed by the template
-    }
-
     print("--- Substituting settings template ---")
-    print(f"Using environment variables and defaults: {list(env_with_defaults.keys())}")
-
     try:
-        filled_str = template.substitute(env_with_defaults)
+        filled_str = template.substitute(os.environ)
         # Validate if it's valid JSON before writing
         json.loads(filled_str)
     except KeyError as e:
