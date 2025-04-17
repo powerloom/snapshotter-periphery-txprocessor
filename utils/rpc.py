@@ -10,7 +10,6 @@ class RpcHelper:
         self.config = config
         self.client = httpx.AsyncClient(timeout=config.request_time_out)
         self._logger = logger.bind(module='RpcHelper')
-        # self.web3 = Web3(Web3.HTTPProvider(config.url)) # Example using Web3.py
 
     async def _make_request(self, method: str, params: list) -> Optional[Dict[str, Any]]:
         """Makes a JSON-RPC request with retries."""

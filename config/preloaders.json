@@ -1,0 +1,9 @@
+{
+    "preloaders": [
+        {
+            "task_type": "receipt_dump",
+            "module": "utils.preloaders.receipt_dumper",
+            "class_name": "ReceiptDumper"
+        }
+    ]
+} 

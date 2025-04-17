@@ -2,7 +2,7 @@ import asyncio
 from config.loader import get_core_config
 from utils.tx_processor import TxProcessor
 from utils.logging import logger
-from utils.redis_conn import RedisPool # Import for shutdown
+from utils.redis.redis_conn import RedisPool # Import for shutdown
 from utils.rpc import RpcHelper # Import for shutdown
 
 async def main():

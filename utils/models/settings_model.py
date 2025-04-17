@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Union, Optional
+from typing import Union, List
 
 class Redis(BaseModel):
     """Redis configuration model."""
@@ -35,3 +35,13 @@ class Settings(BaseModel):
     logs: Logs
     processor: TxProcessorConfig
     namespace: str
+
+class Preloader(BaseModel):
+    """Preloader configuration model."""
+    task_type: str
+    module: str
+    class_name: str
+
+class PreloaderConfig(BaseModel):
+    """Preloader configuration model."""
+    preloaders: List[Preloader]

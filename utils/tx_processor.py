@@ -2,11 +2,13 @@ import asyncio
 import redis.exceptions
 from redis import asyncio as aioredis
 from utils.models.settings_model import Settings
-from utils.redis_conn import RedisPool
+from utils.redis.redis_conn import RedisPool
 from utils.rpc import RpcHelper
 from utils.logging import logger
-from utils.redis_keys import block_tx_htable_key
 import json
+from config.loader import get_preloader_config, PRELOADER_CONFIG_FILE
+from utils.preloaders.manager import PreloaderManager
+import os
 
 class TxProcessor:
     _redis: aioredis.Redis
@@ -17,6 +19,17 @@ class TxProcessor:
         self._logger = logger.bind(module='TxProcessor')
         self.queue_key = f'{settings.processor.redis_queue_key}:{settings.namespace}'
         self.block_timeout = settings.processor.redis_block_timeout
+        
+        # Load preloader hooks from configuration
+        self._logger.info(f"🔧 Initializing TxProcessor with namespace: {settings.namespace}")
+        self._logger.info(f"📋 Using Redis queue key: {self.queue_key}")
+        self._logger.info(f"⏱️ Redis block timeout: {self.block_timeout}s")
+        self._logger.info(f"📁 Loading preloader config from: {os.path.abspath(PRELOADER_CONFIG_FILE)}")
+        preloader_config = get_preloader_config()
+        self.preloader_hooks = PreloaderManager.load_hooks(preloader_config)
+        self._logger.info(f"🔌 Loaded {len(self.preloader_hooks)} preloader hooks:")
+        for hook in self.preloader_hooks:
+            self._logger.info(f"  ├─ {hook.__class__.__name__}")
 
     async def _init(self):
         """Initialize Redis connection and RPC helper."""
@@ -35,18 +48,17 @@ class TxProcessor:
             receipt = await self.rpc_helper.get_transaction_receipt(tx_hash)
             if receipt:
                 self._logger.success(f"✅ Successfully fetched receipt for {tx_hash}")
-                # Store the full receipt as JSON in the hashtable
-                await self._redis.hset(
-                    block_tx_htable_key(self.settings.namespace, receipt['blockNumber']),
-                    tx_hash,
-                    json.dumps(receipt)
-                )
+                
+                # Run all preloader hooks
+                for hook in self.preloader_hooks:
+                    try:
+                        await hook.process_receipt(tx_hash, receipt, self.settings.namespace)
+                    except Exception as e:
+                        self._logger.error(f"💥 Error in preloader hook {hook.__class__.__name__}: {e}")
             else:
-                # This could be normal if the tx hasn't been mined yet or is invalid
                 self._logger.warning(f"⚠️ No receipt found for {tx_hash} (might be pending or invalid)")
         except Exception as e:
             self._logger.error(f"💥 Failed to process {tx_hash}: {str(e)}")
-            # Optional: Add logic to requeue or handle failures
 
     async def start_consuming(self):
         """Continuously consume transaction hashes from Redis queue."""
@@ -58,11 +70,8 @@ class TxProcessor:
                 # Blocking right pop from the list
                 result = await self._redis.brpop(self.queue_key, timeout=self.block_timeout)
                 if result:
-                    _queue_name, tx_hash_bytes = result
-                    tx_hash = tx_hash_bytes # Already decoded if decode_responses=True in RedisPool
-                    self._logger.debug(f"📨 Received transaction hash: {tx_hash}")
-                    # Process the transaction hash asynchronously
-                    # Use create_task for concurrency if receipt fetching is slow
+                    _queue_name, tx_hash = result
+                    self._logger.info(f"📨 Consumed tx hash from queue '{self.queue_key}': {tx_hash}")
                     asyncio.create_task(self.process_transaction(tx_hash))
                 else:
                     # Timeout occurred (only if self.block_timeout > 0)
