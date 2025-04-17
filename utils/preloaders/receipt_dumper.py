@@ -9,9 +9,11 @@ class ReceiptDumper(TxPreloaderHook):
     
     async def process_receipt(self, tx_hash: str, receipt: Dict[str, Any], namespace: str) -> None:
         redis = await RedisPool.get_pool()
+        # Convert hex block number to int
+        block_number = int(receipt['blockNumber'], 16)
         # Store receipt in block-tx mapping
         await redis.hset(
-            block_tx_htable_key(namespace, receipt['blockNumber']),
+            block_tx_htable_key(namespace, block_number),
             tx_hash,
             json.dumps(receipt)
         )
