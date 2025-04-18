@@ -1,54 +1,65 @@
-import sys
 import os
+import sys
+from pathlib import Path
 from loguru import logger
 
-# Ensure logs directory exists
-LOGS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
-os.makedirs(LOGS_DIR, exist_ok=True)
+# Create logs directory if it doesn't exist
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(exist_ok=True)
 
-# Remove default handler
+# Remove default logger
 logger.remove()
 
-# Console handler - always add with default INFO level
+# Define severity levels and their corresponding files
+SEVERITY_FILES = {
+    "ERROR": "error.log",
+    "WARNING": "warning.log",
+    "CRITICAL": "critical.log",
+    "INFO": "info.log",
+    "DEBUG": "debug.log",
+    "TRACE": "trace.log",
+    "SUCCESS": "success.log"
+}
+
+# Common log format for files
+FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+
+# Common log format for console (with colors)
+CONSOLE_FORMAT = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+
+# Add console loggers for different severities
 logger.add(
-    sys.stderr,
+    sys.stdout,
+    format=CONSOLE_FORMAT,
     level="INFO",
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
     colorize=True,
+    filter=lambda record: record["level"].no < logger.level("WARNING").no
 )
 
-def configure_file_logging(write_to_files: bool = True, log_level: str = "INFO", debug_mode: bool = False):
+logger.add(
+    sys.stderr,
+    format=CONSOLE_FORMAT,
+    level="WARNING",
+    colorize=True,
+    filter=lambda record: record["level"].no >= logger.level("WARNING").no
+)
+
+def configure_file_logging(write_to_files: bool = True):
     """Configure file-based logging based on settings."""
-    log_level = log_level.upper()
-    
     if write_to_files:
-        log_file_map = {
-            "DEBUG": os.path.join(LOGS_DIR, "debug.log"),
-            "INFO": os.path.join(LOGS_DIR, "info.log"),
-            "WARNING": os.path.join(LOGS_DIR, "warning.log"),
-            "ERROR": os.path.join(LOGS_DIR, "error.log"),
-            "CRITICAL": os.path.join(LOGS_DIR, "critical.log"),
-        }
-
-        # Add handlers for each level >= configured LOG_LEVEL
-        levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-        log_level_index = levels.index(log_level)
-
-        for level_name in levels[log_level_index:]:
+        # Add file loggers for each severity level
+        for level, filename in SEVERITY_FILES.items():
             logger.add(
-                log_file_map[level_name],
-                level=level_name,
-                rotation="10 MB",
+                LOGS_DIR / filename,
+                rotation="100 MB",
                 retention="7 days",
                 compression="zip",
-                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-                filter=lambda record: record["level"].name == level_name
+                format=FILE_FORMAT,
+                level=level,
+                backtrace=True,
+                diagnose=True,
+                filter=lambda record, level=level: record["level"].name == level
             )
 
-    logger.info(f"Logger configured. Level: {log_level}, Write to files: {write_to_files}")
-
-    if debug_mode:
-        logger.debug("Debug mode enabled.")
-
-# Export the configured logger and configuration function
+# Export the configured logger
 __all__ = ["logger", "configure_file_logging"]
