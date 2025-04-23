@@ -4,6 +4,11 @@
             "task_type": "receipt_dump",
             "module": "utils.preloaders.receipt_dumper",
             "class_name": "ReceiptDumper"
+        },
+        {
+          "task_type": "event_filter_hook",
+          "module": "utils.preloaders.event_filter",
+          "class_name": "EventFilter"
         }
     ]
 } 
