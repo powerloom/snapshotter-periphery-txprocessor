@@ -53,7 +53,7 @@ class AddressSource(BaseModel):
 class EventFilterDefinition(BaseModel):
     filter_name: str
     abi_path: str
-    event_names: List[str] = Field(..., min_items=1)
+    event_topics: List[str] = Field(..., min_items=1)
     address_source: AddressSource # Or make this optional and allow direct address list
     redis_key_pattern: str
     target_addresses: List[str] = Field(default_factory=list, exclude=True) 
