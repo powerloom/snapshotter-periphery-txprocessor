@@ -102,15 +102,13 @@ class EventFilter(TxPreloaderHook):
                 self._logger.error(f"💥 Failed to prepare filter '{filter_def.filter_name}': {type(e).__name__} - {e}")
 
     async def process_receipt(self, tx_hash: str, receipt: Dict[str, Any], namespace: str) -> None:
-        """Process logs in a transaction receipt, decode events matching filters, and store in Redis Hashes."""
+        """Process logs in a transaction receipt, decode events matching filters, and store in Redis ZSets (one per address)."""
         if not receipt or 'logs' not in receipt or not isinstance(receipt.get('logs'), list) or not receipt['logs']:
-            return # No logs to process or invalid logs format
+            return
 
         try:
             redis = await RedisPool.get_pool()
-            web3_codec = Web3.codec # Use the default Web3 codec instance
-
-            # Extract block number safely
+            web3_codec = Web3.codec
             block_number_hex = receipt.get('blockNumber')
             tx_index_hex = receipt.get('transactionIndex')
             if block_number_hex is None or tx_index_hex is None:
@@ -124,51 +122,49 @@ class EventFilter(TxPreloaderHook):
             self._logger.error(f"Error during initial setup for tx {tx_hash}: {init_err}")
             return
 
+        # Define a multiplier for the composite score (block_number dominates log_index)
+        SCORE_BLOCK_MULTIPLIER = 1_000_000
+
+        # Group ZADD commands by key (address)
+        # Structure: {redis_key: {score1: member1, score2: member2, ...}}
+        commands_by_key: Dict[str, Dict[int, str]] = {}
         found_events_count = 0
-        # Use a dictionary to group commands by redis key (block number)
-        commands_by_key: Dict[str, Dict[str, str]] = {}
 
         for log_entry in receipt['logs']:
             try:
-                # Validate essential log fields
                 log_address = log_entry.get('address')
                 log_topics = log_entry.get('topics')
                 log_index_hex = log_entry.get('logIndex')
                 
                 if not log_address or not log_topics or log_index_hex is None:
                     self._logger.trace(f"Skipping invalid log entry in tx {tx_hash}: {log_entry}")
-                    continue # Skip invalid log entry
+                    continue
 
                 log_address_lower = log_address.lower()
-                # Ensure topic is HexBytes before calling hex()
                 log_topic0_hex = log_topics[0].hex() if hasattr(log_topics[0], 'hex') else str(log_topics[0])
                 log_topic0_standard = ('0x' + log_topic0_hex.lower().lstrip('0x'))
                 log_index = int(log_index_hex, 16)
 
                 for filter_name, processed_filter in self.processed_filters.items():
-                    # Check 1: Address match
-                    if log_address_lower in processed_filter['target_addresses_lower']:
-                        # Check 2: Topic match (using standard 0x-prefixed keys)
-                        if log_topic0_standard in processed_filter['events_by_topic']:
-                            event_details = processed_filter['events_by_topic'][log_topic0_standard]
-                            event_abi = event_details['abi']
-                            event_name = event_details['name']
+                    if log_address_lower in processed_filter.target_addresses_lower:
+                        if log_topic0_standard in processed_filter.events_by_topic:
+                            event_details = processed_filter.events_by_topic[log_topic0_standard]
+                            event_abi = event_details.abi
+                            event_name = event_details.name
                             
                             try:
-                                # Decode the event using the matched ABI
                                 decoded_event = get_event_data(web3_codec, event_abi, log_entry)
-                                found_events_count += 1
-                                self._logger.debug(f"  -> Matched event '{event_name}' from filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index})")
+                                
+                                # Calculate composite score: (block_number * MULTIPLIER) + log_index
+                                score = (block_number * SCORE_BLOCK_MULTIPLIER) + log_index
 
-                                # Prepare key and field for Redis Hash
-                                redis_key = processed_filter['redis_key_pattern'].format(
+                                # Prepare key (per address) and member for Redis ZSet
+                                redis_key = processed_filter.redis_key_pattern.format(
                                     namespace=namespace, 
-                                    block_number=block_number,
                                     address=log_address
                                 )
-                                redis_field = f"{tx_hash}:{log_index}"
-
-                                # Store relevant info: decoded args, log details, tx info as JSON
+                                
+                                # Member is the JSON string of event details
                                 event_data_to_store = {
                                     'eventName': event_name,
                                     'filterName': filter_name,
@@ -176,34 +172,40 @@ class EventFilter(TxPreloaderHook):
                                     'blockNumber': block_number,
                                     'txIndex': tx_index,
                                     'logIndex': log_index,
-                                    'address': log_address, # Keep original case
-                                    'topics': [t.hex() if hasattr(t, 'hex') else str(t) for t in log_topics], 
+                                    'address': log_address,
+                                    'topics': [t.hex() if hasattr(t, 'hex') else str(t) for t in log_topics],
                                     'data': log_entry.get('data', ''),
-                                    'args': dict(decoded_event['args']), # Convert AttributeDict to dict
+                                    'args': dict(decoded_event['args']),
+                                    '_score': score
                                 }
+                                member = json.dumps(event_data_to_store)
                                 
-                                # Group HSET commands by key for potential pipeline optimization
+                                # Group ZADD commands by key
                                 if redis_key not in commands_by_key:
                                     commands_by_key[redis_key] = {}
-                                commands_by_key[redis_key][redis_field] = json.dumps(event_data_to_store)
+                                
+                                if score in commands_by_key[redis_key]:
+                                     self._logger.warning(f"Score collision detected for key {redis_key}, score {score}. Overwriting previous member for this tx.")
+                                
+                                commands_by_key[redis_key][score] = member
+                                found_events_count += 1
+                                self._logger.debug(f"  -> Matched event '{event_name}' from filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index}). Score: {score}")
 
                             except Exception as decode_err:
                                 self._logger.error(
-                                    f"💥 Error decoding event '{event_name}' (topic: {log_topic0_standard}) "
+                                    f"💥 Error decoding/processing event '{event_name}' (topic: {log_topic0_standard}) "
                                     f"for filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index}): {decode_err}"
                                 )
-                                # Continue to next filter or log
             except Exception as log_proc_err:
                  self._logger.error(f"💥 Unexpected error processing log entry in tx {tx_hash}: {log_proc_err} | Log: {log_entry}")
-                 continue # Move to the next log entry
+                 continue
 
-        # Execute Redis commands if any events were found
         if found_events_count > 0:
             try:
-                pipeline = redis.pipeline(transaction=False) # Use pipeline without transaction for performance
-                for r_key, field_value_map in commands_by_key.items():
-                    pipeline.hset(r_key, mapping=field_value_map)
+                pipeline = redis.pipeline(transaction=False)
+                for r_key, score_member_map in commands_by_key.items():
+                    pipeline.zadd(r_key, mapping=score_member_map)
                 await pipeline.execute()
-                self._logger.success(f"💾 Stored {found_events_count} filtered events from tx {tx_hash} into Redis Hashes.")
+                self._logger.success(f"💾 Stored {found_events_count} filtered events from tx {tx_hash} into Redis ZSets (Key: {list(commands_by_key.keys())}).")
             except Exception as redis_err:
                  self._logger.error(f"❌ Failed to store filtered events from tx {tx_hash} to Redis: {redis_err}")
