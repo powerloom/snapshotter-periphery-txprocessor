@@ -78,7 +78,7 @@ def get_event_filter_config() -> EventFiltersConfig:
 
         config = EventFiltersConfig(**config_dict)
 
-        workspace_root = service_root.parent # Adjust if needed
+        workspace_root = service_root.parent
         for filter_def in config.filters:
              # Ensure address_source and config_file exist before proceeding
              if not hasattr(filter_def, 'address_source') or not hasattr(filter_def.address_source, 'config_file'):
