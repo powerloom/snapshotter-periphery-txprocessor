@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from typing import Dict, Any, List
 from web3 import Web3
-from web3._utils import abi as abi_utils
 from web3._utils.events import get_event_data
 from eth_utils.abi import event_abi_to_log_topic
 
@@ -107,6 +106,109 @@ class EventFilter(TxPreloaderHook):
                 self._logger.error(f"💥 Failed to prepare filter '{filter_def.filter_name}': {type(e).__name__} - {e}")
 
     async def process_receipt(self, tx_hash: str, receipt: Dict[str, Any], namespace: str) -> None:
-        # This method remains unchanged as it relies on the prepared filters
-        # Implementation to be added later
-        pass
+        """Process logs in a transaction receipt, decode events matching filters, and store in Redis Hashes."""
+        if not receipt or 'logs' not in receipt or not isinstance(receipt.get('logs'), list) or not receipt['logs']:
+            # self._logger.trace(f"No logs found in receipt for tx {tx_hash}")
+            return # No logs to process or invalid logs format
+
+        try:
+            redis = await RedisPool.get_pool()
+            web3_codec = Web3.codec # Use the default Web3 codec instance
+
+            # Extract block number safely
+            block_number_hex = receipt.get('blockNumber')
+            tx_index_hex = receipt.get('transactionIndex')
+            if block_number_hex is None or tx_index_hex is None:
+                self._logger.warning(f"Missing blockNumber or transactionIndex in receipt for tx {tx_hash}")
+                return
+            
+            block_number = int(block_number_hex, 16)
+            tx_index = int(tx_index_hex, 16)
+
+        except Exception as init_err:
+            self._logger.error(f"Error during initial setup for tx {tx_hash}: {init_err}")
+            return
+
+        found_events_count = 0
+        # Use a dictionary to group commands by redis key (block number)
+        commands_by_key: Dict[str, Dict[str, str]] = {}
+
+        for log_entry in receipt['logs']:
+            try:
+                # Validate essential log fields
+                log_address = log_entry.get('address')
+                log_topics = log_entry.get('topics')
+                log_index_hex = log_entry.get('logIndex')
+                
+                if not log_address or not log_topics or log_index_hex is None:
+                    self._logger.trace(f"Skipping invalid log entry in tx {tx_hash}: {log_entry}")
+                    continue # Skip invalid log entry
+
+                log_address_lower = log_address.lower()
+                # Ensure topic is HexBytes before calling hex()
+                log_topic0_hex = log_topics[0].hex() if hasattr(log_topics[0], 'hex') else str(log_topics[0])
+                log_topic0_standard = ('0x' + log_topic0_hex.lower().lstrip('0x'))
+                log_index = int(log_index_hex, 16)
+
+                for filter_name, processed_filter in self.processed_filters.items():
+                    # Check 1: Address match
+                    if log_address_lower in processed_filter['target_addresses_lower']:
+                        # Check 2: Topic match (using standard 0x-prefixed keys)
+                        if log_topic0_standard in processed_filter['events_by_topic']:
+                            event_details = processed_filter['events_by_topic'][log_topic0_standard]
+                            event_abi = event_details['abi']
+                            event_name = event_details['name']
+                            
+                            try:
+                                # Decode the event using the matched ABI
+                                decoded_event = get_event_data(web3_codec, event_abi, log_entry)
+                                found_events_count += 1
+                                self._logger.debug(f"  -> Matched event '{event_name}' from filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index})")
+
+                                # Prepare key and field for Redis Hash
+                                redis_key = processed_filter['redis_key_pattern'].format(
+                                    namespace=namespace, 
+                                    block_number=block_number,
+                                    address=log_address
+                                )
+                                redis_field = f"{tx_hash}:{log_index}"
+
+                                # Store relevant info: decoded args, log details, tx info as JSON
+                                event_data_to_store = {
+                                    'eventName': event_name,
+                                    'filterName': filter_name,
+                                    'txHash': tx_hash,
+                                    'blockNumber': block_number,
+                                    'txIndex': tx_index,
+                                    'logIndex': log_index,
+                                    'address': log_address, # Keep original case
+                                    'topics': [t.hex() if hasattr(t, 'hex') else str(t) for t in log_topics], 
+                                    'data': log_entry.get('data', ''),
+                                    'args': dict(decoded_event['args']), # Convert AttributeDict to dict
+                                }
+                                
+                                # Group HSET commands by key for potential pipeline optimization
+                                if redis_key not in commands_by_key:
+                                    commands_by_key[redis_key] = {}
+                                commands_by_key[redis_key][redis_field] = json.dumps(event_data_to_store)
+
+                            except Exception as decode_err:
+                                self._logger.error(
+                                    f"💥 Error decoding event '{event_name}' (topic: {log_topic0_standard}) "
+                                    f"for filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index}): {decode_err}"
+                                )
+                                # Continue to next filter or log
+            except Exception as log_proc_err:
+                 self._logger.error(f"💥 Unexpected error processing log entry in tx {tx_hash}: {log_proc_err} | Log: {log_entry}")
+                 continue # Move to the next log entry
+
+        # Execute Redis commands if any events were found
+        if found_events_count > 0:
+            try:
+                pipeline = redis.pipeline(transaction=False) # Use pipeline without transaction for performance
+                for r_key, field_value_map in commands_by_key.items():
+                    pipeline.hset(r_key, mapping=field_value_map)
+                await pipeline.execute()
+                self._logger.success(f"💾 Stored {found_events_count} filtered events from tx {tx_hash} into Redis Hashes.")
+            except Exception as redis_err:
+                 self._logger.error(f"❌ Failed to store filtered events from tx {tx_hash} to Redis: {redis_err}")
