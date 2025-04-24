@@ -7,6 +7,7 @@ from eth_utils.abi import event_abi_to_log_topic
 
 from .base import TxPreloaderHook
 from config.loader import get_event_filter_config
+from utils.models.data_models import ProcessedFilterData, ProcessedEventDetail 
 from utils.logging import logger
 from utils.redis.redis_conn import RedisPool
 
@@ -17,7 +18,7 @@ class EventFilter(TxPreloaderHook):
     def __init__(self):
         self._logger = logger.bind(module='EventFilterHook')
         self.filters_config = get_event_filter_config()
-        self.processed_filters: Dict[str, Dict[str, Any]] = {}
+        self.processed_filters: Dict[str, ProcessedFilterData] = {}
         self._prepare_filters()
 
     def _prepare_filters(self):
@@ -50,7 +51,6 @@ class EventFilter(TxPreloaderHook):
 
                 abi = loaded_abis[str(abi_path)]
                 
-                # Build a set of configured topics (standard: lowercase, 0x-prefixed)
                 config_topics_set = set()
                 for topic in filter_def.event_topics:
                     normalized_topic = topic.lower()
@@ -60,29 +60,25 @@ class EventFilter(TxPreloaderHook):
                 
                 self._logger.info(f"  🔍 Will look for {len(config_topics_set)} standard configured topics: {config_topics_set}")
                 
-                target_event_details: Dict[str, Dict[str, Any]] = {}
+                target_event_details: Dict[str, ProcessedEventDetail] = {}
                 all_event_abis = [item for item in abi if item.get('type') == 'event']
 
-                # Iterate through ABIs once, calculate standard hash, and check against the config set
                 for event_abi_item in all_event_abis:
                     try:
                         calculated_topic_hash_bytes = event_abi_to_log_topic(event_abi_item)
-                        # Convert calculated hash to standard format (lowercase, 0x-prefix)
                         standard_calculated_hash = '0x' + calculated_topic_hash_bytes.hex().lower()
 
-                        # Check if this standard calculated hash is one we care about
                         if standard_calculated_hash in config_topics_set:
                             event_name = event_abi_item.get('name', 'UnnamedEvent')
                             self._logger.info(f"  ✔️ Matched ABI event '{event_name}' to configured topic (hash: {standard_calculated_hash})")
-                            target_event_details[standard_calculated_hash] = {
-                                'name': event_name,
-                                'abi': event_abi_item
-                            }
+                            target_event_details[standard_calculated_hash] = ProcessedEventDetail(
+                                name=event_name,
+                                abi=event_abi_item
+                            )
                     except Exception as abi_calc_err:
                         self._logger.warning(f"  ⚠️ Error processing ABI item: {event_abi_item.get('name', '?')} - {abi_calc_err}")
                         continue
 
-                # After checking all ABIs, verify all configured topics were found
                 found_topics = set(target_event_details.keys())
                 missing_topics = config_topics_set - found_topics
                 for missing in missing_topics:
@@ -95,11 +91,11 @@ class EventFilter(TxPreloaderHook):
                 target_addresses_lower = {addr.lower() for addr in filter_def.target_addresses}
                 self._logger.info(f"  🎯 Filter will target {len(target_addresses_lower)} addresses.")
 
-                self.processed_filters[filter_def.filter_name] = {
-                    'target_addresses_lower': target_addresses_lower,
-                    'events_by_topic': target_event_details, 
-                    'redis_key_pattern': filter_def.redis_key_pattern
-                }
+                self.processed_filters[filter_def.filter_name] = ProcessedFilterData(
+                    target_addresses_lower=target_addresses_lower,
+                    events_by_topic=target_event_details,
+                    redis_key_pattern=filter_def.redis_key_pattern
+                )
                 self._logger.success(f"  👍 Filter '{filter_def.filter_name}' prepared successfully.")
 
             except Exception as e:
@@ -108,7 +104,6 @@ class EventFilter(TxPreloaderHook):
     async def process_receipt(self, tx_hash: str, receipt: Dict[str, Any], namespace: str) -> None:
         """Process logs in a transaction receipt, decode events matching filters, and store in Redis Hashes."""
         if not receipt or 'logs' not in receipt or not isinstance(receipt.get('logs'), list) or not receipt['logs']:
-            # self._logger.trace(f"No logs found in receipt for tx {tx_hash}")
             return # No logs to process or invalid logs format
 
         try:

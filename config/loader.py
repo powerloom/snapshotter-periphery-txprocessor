@@ -2,13 +2,14 @@ import os
 import json
 from functools import lru_cache
 from pathlib import Path
-from utils.models.settings_model import Settings, PreloaderConfig, EventFiltersConfig
+from utils.models.settings_model import Settings, PreloaderConfig
+from utils.models.data_models import EventFiltersConfig
 from utils.logging import logger
 
 CONFIG_DIR = os.path.dirname(__file__)
 SETTINGS_FILE = os.path.join(CONFIG_DIR, 'settings.json')
-PRELOADER_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'preloaders.json')
-EVENT_FILTER_CONFIG_PATH = os.getenv('EVENT_FILTER_CONFIG_PATH', 'config/event_filters.example.json')
+PRELOADER_CONFIG_FILE = os.path.join(CONFIG_DIR, 'preloaders.json')
+EVENT_FILTER_CONFIG_PATH = os.getenv('EVENT_FILTER_CONFIG_PATH', '/app/shared_config/event_filters.example.json')
 
 _logger = logger.bind(module='ConfigLoader')
 

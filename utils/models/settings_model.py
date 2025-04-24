@@ -45,18 +45,3 @@ class Preloader(BaseModel):
 class PreloaderConfig(BaseModel):
     """Preloader configuration model."""
     preloaders: List[Preloader]
-
-class AddressSource(BaseModel):
-    config_file: str
-    # We might add a field here later to specify how to extract addresses e.g., by project_type
-    
-class EventFilterDefinition(BaseModel):
-    filter_name: str
-    abi_path: str
-    event_topics: List[str] = Field(..., min_items=1)
-    address_source: AddressSource # Or make this optional and allow direct address list
-    redis_key_pattern: str
-    target_addresses: List[str] = Field(default_factory=list, exclude=True) 
-
-class EventFiltersConfig(BaseModel):
-    filters: List[EventFilterDefinition]
