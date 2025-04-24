@@ -1,9 +1,10 @@
 import json
 from pathlib import Path
 from typing import Dict, Any, List
-from web3 import Web3
 from web3._utils.events import get_event_data
 from eth_utils.abi import event_abi_to_log_topic
+from eth_abi.codec import ABICodec
+from eth_abi.registry import registry as default_abi_registry
 
 from .base import TxPreloaderHook
 from config.loader import get_event_filter_config
@@ -14,12 +15,13 @@ from utils.redis.redis_conn import RedisPool
 
 class EventFilter(TxPreloaderHook):
     """Filters transaction logs based on configured event topics and addresses."""
-    
+
     def __init__(self):
         self._logger = logger.bind(module='EventFilterHook')
         self.filters_config = get_event_filter_config()
         self.processed_filters: Dict[str, ProcessedFilterData] = {}
         self._prepare_filters()
+        self.codec = ABICodec(default_abi_registry)
 
     def _prepare_filters(self):
         """Load ABIs, find event ABIs matching configured topics, and store processed filter info."""
@@ -108,7 +110,7 @@ class EventFilter(TxPreloaderHook):
 
         try:
             redis = await RedisPool.get_pool()
-            web3_codec = Web3.codec
+            
             block_number_hex = receipt.get('blockNumber')
             tx_index_hex = receipt.get('transactionIndex')
             if block_number_hex is None or tx_index_hex is None:
@@ -126,8 +128,8 @@ class EventFilter(TxPreloaderHook):
         SCORE_BLOCK_MULTIPLIER = 1_000_000
 
         # Group ZADD commands by key (address)
-        # Structure: {redis_key: {score1: member1, score2: member2, ...}}
-        commands_by_key: Dict[str, Dict[int, str]] = {}
+        # Structure: {redis_key: {member1: score1, member2: score2, ...}}
+        commands_by_key: Dict[str, Dict[str, int]] = {}
         found_events_count = 0
 
         for log_entry in receipt['logs']:
@@ -153,15 +155,16 @@ class EventFilter(TxPreloaderHook):
                             event_name = event_details.name
                             
                             try:
-                                decoded_event = get_event_data(web3_codec, event_abi, log_entry)
+                                # Use the class codec
+                                decoded_event = get_event_data(self.codec, event_abi, log_entry)
                                 
-                                # Calculate composite score: (block_number * MULTIPLIER) + log_index
+                                # Calculate composite score
                                 score = (block_number * SCORE_BLOCK_MULTIPLIER) + log_index
 
                                 # Prepare key (per address) and member for Redis ZSet
                                 redis_key = processed_filter.redis_key_pattern.format(
                                     namespace=namespace, 
-                                    address=log_address
+                                    address=log_address 
                                 )
                                 
                                 # Member is the JSON string of event details
@@ -173,21 +176,20 @@ class EventFilter(TxPreloaderHook):
                                     'txIndex': tx_index,
                                     'logIndex': log_index,
                                     'address': log_address,
-                                    'topics': [t.hex() if hasattr(t, 'hex') else str(t) for t in log_topics],
+                                    'topics': ['0x' + (t.hex() if hasattr(t, 'hex') else str(t)).lstrip('0x').lower() for t in log_topics],
                                     'data': log_entry.get('data', ''),
                                     'args': dict(decoded_event['args']),
-                                    '_score': score
+                                    '_score': score # Keep score in data for reference if needed
                                 }
                                 member = json.dumps(event_data_to_store)
                                 
-                                # Group ZADD commands by key
+                                # Group ZADD commands by key, using {member: score} mapping
                                 if redis_key not in commands_by_key:
                                     commands_by_key[redis_key] = {}
                                 
-                                if score in commands_by_key[redis_key]:
-                                     self._logger.warning(f"Score collision detected for key {redis_key}, score {score}. Overwriting previous member for this tx.")
                                 
-                                commands_by_key[redis_key][score] = member
+                                
+                                commands_by_key[redis_key][member] = score
                                 found_events_count += 1
                                 self._logger.debug(f"  -> Matched event '{event_name}' from filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index}). Score: {score}")
 
@@ -203,8 +205,8 @@ class EventFilter(TxPreloaderHook):
         if found_events_count > 0:
             try:
                 pipeline = redis.pipeline(transaction=False)
-                for r_key, score_member_map in commands_by_key.items():
-                    pipeline.zadd(r_key, mapping=score_member_map)
+                for r_key, member_score_map in commands_by_key.items():
+                    pipeline.zadd(r_key, mapping=member_score_map)
                 await pipeline.execute()
                 self._logger.success(f"💾 Stored {found_events_count} filtered events from tx {tx_hash} into Redis ZSets (Key: {list(commands_by_key.keys())}).")
             except Exception as redis_err:

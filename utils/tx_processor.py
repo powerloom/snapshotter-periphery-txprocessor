@@ -53,7 +53,6 @@ class TxProcessor:
                 for hook in self.preloader_hooks:
                     try:
                         await hook.process_receipt(tx_hash, receipt, self.settings.namespace)
-                        self._logger.info(f"✅ Preloader hook {hook.__class__.__name__} processed successfully")
                     except Exception as e:
                         self._logger.error(f"💥 Error in preloader hook {hook.__class__.__name__}: {e}")
             else:
