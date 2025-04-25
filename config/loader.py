@@ -67,11 +67,11 @@ def get_event_filter_config() -> EventFiltersConfig:
     
     _logger.info(f"📖 Loading event filter config from: {full_config_path}")
     if not full_config_path.exists():
-         _logger.error(f"❌ Event filter config file not found at {full_config_path}")
-         # Provide a helpful default path if not found
-         default_path = (service_root.parent / 'config/event_filters.example.json').resolve()
-         _logger.info(f"ℹ️ Default path would be: {default_path}")
-         raise RuntimeError(f"Event filter config file not found at {full_config_path}. Check EVENT_FILTER_CONFIG_PATH env var.")
+        _logger.error(f"❌ Event filter config file not found at {full_config_path}")
+        # Provide a helpful default path if not found
+        default_path = (service_root.parent / 'config/event_filters.example.json').resolve()
+        _logger.info(f"ℹ️ Default path would be: {default_path}")
+        raise RuntimeError(f"Event filter config file not found at {full_config_path}. Check EVENT_FILTER_CONFIG_PATH env var.")
 
     try:
         with open(full_config_path, 'r') as f:
@@ -81,41 +81,41 @@ def get_event_filter_config() -> EventFiltersConfig:
 
         workspace_root = service_root.parent
         for filter_def in config.filters:
-             # Ensure address_source and config_file exist before proceeding
-             if not hasattr(filter_def, 'address_source') or not hasattr(filter_def.address_source, 'config_file'):
-                 _logger.warning(f"⚠️ Filter '{filter_def.filter_name}' is missing address_source configuration. Skipping address loading.")
-                 continue
+            # Ensure address_source and config_file exist before proceeding
+            if not hasattr(filter_def, 'address_source') or not hasattr(filter_def.address_source, 'config_file'):
+                _logger.warning(f"⚠️ Filter '{filter_def.filter_name}' is missing address_source configuration. Skipping address loading.")
+                continue
 
-             projects_config_path_str = filter_def.address_source.config_file
-             # Resolve project config path relative to workspace root
-             if not projects_config_path_str.startswith('/'):
-                 projects_config_path = (workspace_root / projects_config_path_str).resolve()
-             else:
-                 projects_config_path = Path(projects_config_path_str)
+            projects_config_path_str = filter_def.address_source.config_file
+            # Resolve project config path relative to workspace root
+            if not projects_config_path_str.startswith('/'):
+                projects_config_path = (workspace_root / projects_config_path_str).resolve()
+            else:
+                projects_config_path = Path(projects_config_path_str)
 
-             if not projects_config_path.exists():
-                 _logger.error(f"❌ Projects config file not found for filter '{filter_def.filter_name}': {projects_config_path}")
-                 # Decide behaviour: skip filter or raise error
-                 raise RuntimeError(f"Projects config file '{projects_config_path}' not found for filter '{filter_def.filter_name}'.")
-             
-             try:
-                 with open(projects_config_path, 'r') as f:
-                     projects_data = json.load(f)
-             except json.JSONDecodeError as e:
-                  _logger.error(f"❌ Error decoding projects config file '{projects_config_path}': {e}")
-                  raise RuntimeError(f"Error decoding projects config file '{projects_config_path}': {e}")
+            if not projects_config_path.exists():
+                _logger.error(f"❌ Projects config file not found for filter '{filter_def.filter_name}': {projects_config_path}")
+                # Decide behaviour: skip filter or raise error
+                raise RuntimeError(f"Projects config file '{projects_config_path}' not found for filter '{filter_def.filter_name}'.")
 
-             all_addresses = set()
-             if 'config' in projects_data and isinstance(projects_data['config'], list):
-                 for project_entry in projects_data['config']:
-                     if 'projects' in project_entry and isinstance(project_entry['projects'], list):
-                         # Ensure addresses are strings and lowercase for consistency
-                         valid_addresses = {str(addr).lower() for addr in project_entry['projects'] if isinstance(addr, str)}
-                         all_addresses.update(valid_addresses)
-             
-             filter_def.target_addresses = list(all_addresses)
-             _logger.info(f"  Loaded {len(filter_def.target_addresses)} unique target addresses for filter '{filter_def.filter_name}' from {projects_config_path}")
-        
+            try:
+                with open(projects_config_path, 'r') as f:
+                    projects_data = json.load(f)
+            except json.JSONDecodeError as e:
+                _logger.error(f"❌ Error decoding projects config file '{projects_config_path}': {e}")
+                raise RuntimeError(f"Error decoding projects config file '{projects_config_path}': {e}")
+
+            all_addresses = set()
+            if 'config' in projects_data and isinstance(projects_data['config'], list):
+                for project_entry in projects_data['config']:
+                    if 'projects' in project_entry and isinstance(project_entry['projects'], list):
+                        # Ensure addresses are strings and lowercase for consistency
+                        valid_addresses = {str(addr).lower() for addr in project_entry['projects'] if isinstance(addr, str)}
+                        all_addresses.update(valid_addresses)
+
+            filter_def.target_addresses = list(all_addresses)
+            _logger.info(f"  Loaded {len(filter_def.target_addresses)} unique target addresses for filter '{filter_def.filter_name}' from {projects_config_path}")
+
         _logger.success(f"✅ Successfully loaded {len(config.filters)} event filter configurations")
         return config
     except json.JSONDecodeError as e:

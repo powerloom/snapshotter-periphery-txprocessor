@@ -26,7 +26,7 @@ class EventFilter(TxPreloaderHook):
     def _prepare_filters(self):
         """Load ABIs, find event ABIs matching configured topics, and store processed filter info."""
         workspace_root = Path(__file__).parent.parent.parent.parent
-        
+
         loaded_abis: Dict[str, List[Dict[str, Any]]] = {}
 
         for filter_def in self.filters_config.filters:
@@ -38,7 +38,7 @@ class EventFilter(TxPreloaderHook):
                     abi_path = Path(abi_path_str)
 
                 self._logger.info(f"🔧 Processing filter '{filter_def.filter_name}': ABI at {abi_path}")
-                
+
                 if str(abi_path) not in loaded_abis:
                     if not abi_path.exists():
                         self._logger.error(f"  ❌ ABI file not found: {abi_path}")
@@ -52,16 +52,16 @@ class EventFilter(TxPreloaderHook):
                         raise RuntimeError(f"Error decoding ABI file '{abi_path}': {e}")
 
                 abi = loaded_abis[str(abi_path)]
-                
+
                 config_topics_set = set()
                 for topic in filter_def.event_topics:
                     normalized_topic = topic.lower()
                     if not normalized_topic.startswith('0x'):
                         normalized_topic = '0x' + normalized_topic
                     config_topics_set.add(normalized_topic)
-                
+
                 self._logger.info(f"  🔍 Will look for {len(config_topics_set)} standard configured topics: {config_topics_set}")
-                
+
                 target_event_details: Dict[str, ProcessedEventDetail] = {}
                 all_event_abis = [item for item in abi if item.get('type') == 'event']
 
@@ -85,11 +85,11 @@ class EventFilter(TxPreloaderHook):
                 missing_topics = config_topics_set - found_topics
                 for missing in missing_topics:
                     self._logger.warning(f"  ⚠️ Configured topic {missing} not found in ABI {abi_path} for filter '{filter_def.filter_name}'")
-                
+
                 if not target_event_details:
-                     self._logger.error(f"  ❌ No valid event ABIs found for any configured topics in filter '{filter_def.filter_name}', skipping this filter.")
-                     continue
-                     
+                    self._logger.error(f"  ❌ No valid event ABIs found for any configured topics in filter '{filter_def.filter_name}', skipping this filter.")
+                    continue
+
                 target_addresses_lower = {addr.lower() for addr in filter_def.target_addresses}
                 self._logger.info(f"  🎯 Filter will target {len(target_addresses_lower)} addresses.")
 
@@ -110,13 +110,13 @@ class EventFilter(TxPreloaderHook):
 
         try:
             redis = await RedisPool.get_pool()
-            
+
             block_number_hex = receipt.get('blockNumber')
             tx_index_hex = receipt.get('transactionIndex')
             if block_number_hex is None or tx_index_hex is None:
                 self._logger.warning(f"Missing blockNumber or transactionIndex in receipt for tx {tx_hash}")
                 return
-            
+
             block_number = int(block_number_hex, 16)
             tx_index = int(tx_index_hex, 16)
 
@@ -137,7 +137,7 @@ class EventFilter(TxPreloaderHook):
                 log_address = log_entry.get('address')
                 log_topics = log_entry.get('topics')
                 log_index_hex = log_entry.get('logIndex')
-                
+
                 if not log_address or not log_topics or log_index_hex is None:
                     self._logger.trace(f"Skipping invalid log entry in tx {tx_hash}: {log_entry}")
                     continue
@@ -153,20 +153,20 @@ class EventFilter(TxPreloaderHook):
                             event_details = processed_filter.events_by_topic[log_topic0_standard]
                             event_abi = event_details.abi
                             event_name = event_details.name
-                            
+
                             try:
                                 # Use the class codec
                                 decoded_event = get_event_data(self.codec, event_abi, log_entry)
-                                
+
                                 # Calculate composite score
                                 score = (block_number * SCORE_BLOCK_MULTIPLIER) + log_index
 
                                 # Prepare key (per address) and member for Redis ZSet
                                 redis_key = processed_filter.redis_key_pattern.format(
-                                    namespace=namespace, 
-                                    address=log_address 
+                                    namespace=namespace,
+                                    address=log_address
                                 )
-                                
+
                                 # Member is the JSON string of event details
                                 event_data_to_store = {
                                     'eventName': event_name,
@@ -182,13 +182,11 @@ class EventFilter(TxPreloaderHook):
                                     '_score': score # Keep score in data for reference if needed
                                 }
                                 member = json.dumps(event_data_to_store)
-                                
+
                                 # Group ZADD commands by key, using {member: score} mapping
                                 if redis_key not in commands_by_key:
                                     commands_by_key[redis_key] = {}
-                                
-                                
-                                
+
                                 commands_by_key[redis_key][member] = score
                                 found_events_count += 1
                                 self._logger.debug(f"  -> Matched event '{event_name}' from filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index}). Score: {score}")
@@ -199,8 +197,8 @@ class EventFilter(TxPreloaderHook):
                                     f"for filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index}): {decode_err}"
                                 )
             except Exception as log_proc_err:
-                 self._logger.error(f"💥 Unexpected error processing log entry in tx {tx_hash}: {log_proc_err} | Log: {log_entry}")
-                 continue
+                self._logger.error(f"💥 Unexpected error processing log entry in tx {tx_hash}: {log_proc_err} | Log: {log_entry}")
+                continue
 
         if found_events_count > 0:
             try:
@@ -210,4 +208,4 @@ class EventFilter(TxPreloaderHook):
                 await pipeline.execute()
                 self._logger.success(f"💾 Stored {found_events_count} filtered events from tx {tx_hash} into Redis ZSets (Key: {list(commands_by_key.keys())}).")
             except Exception as redis_err:
-                 self._logger.error(f"❌ Failed to store filtered events from tx {tx_hash} to Redis: {redis_err}")
+                self._logger.error(f"❌ Failed to store filtered events from tx {tx_hash} to Redis: {redis_err}")
