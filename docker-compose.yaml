@@ -14,6 +14,8 @@ services:
       - REDIS_PASSWORD
       - REDIS_SSL
       - REDIS_CLUSTER
+      - REDIS_MAX_BLOCKS
+      - REDIS_TTL_SECONDS
       - LOG_DEBUG
       - LOG_TO_FILES
       - LOG_LEVEL

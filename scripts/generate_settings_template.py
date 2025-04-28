@@ -17,7 +17,11 @@ def generate_template():
             "db": "${REDIS_DB}",
             "password": "${REDIS_PASSWORD}",
             "ssl": "${REDIS_SSL}",
-            "cluster_mode": "${REDIS_CLUSTER}"
+            "cluster_mode": "${REDIS_CLUSTER}",
+            "data_retention": {
+                "max_blocks": "${REDIS_MAX_BLOCKS}",
+                "ttl_seconds": "${REDIS_TTL_SECONDS}"
+            }
         },
         "logs": {
             "debug_mode": "${LOG_DEBUG}",

@@ -1,5 +1,10 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Union, List, Dict, Optional
+
+class RedisDataRetentionConfig(BaseModel):
+    """Redis data retention configuration model."""
+    max_blocks: int
+    ttl_seconds: int
 
 class Redis(BaseModel):
     """Redis configuration model."""
@@ -9,6 +14,7 @@ class Redis(BaseModel):
     password: Union[str, None] = None
     ssl: bool = False
     cluster_mode: bool = False
+    data_retention: RedisDataRetentionConfig
 
 class RPCConfig(BaseModel):
     """RPC configuration model."""
