@@ -66,10 +66,24 @@ class EventFilter(TxPreloaderHook):
         if address_lower in self.detected_pool_addresses:
             return self.detected_pool_addresses[address_lower]
 
-        # Check if contract is a UniswapV3Pool
-        is_pool = await self._uniswap_v3_detector.is_uniswap_v3_pool(address)
-        self.detected_pool_addresses[address_lower] = is_pool
-        return is_pool
+        # Retry up to 3 times before marking as non-pool
+        retry_count = 3
+        for attempt in range(retry_count):
+            try:
+                is_pool = await self._uniswap_v3_detector.is_uniswap_v3_pool(address)
+                if is_pool:
+                    self.detected_pool_addresses[address_lower] = True
+                    return True
+                # Only continue retrying on failure
+            except Exception as e:
+                self._logger.warning(f"Attempt {attempt + 1}/{retry_count} failed for {address}: {e}")
+                if attempt == retry_count - 1:
+                    # Log the final failure
+                    self._logger.error(f"All {retry_count} attempts failed to detect pool status for {address}")
+        
+        # After all retries failed
+        self.detected_pool_addresses[address_lower] = False
+        return False
     
     def _prepare_filters(self):
         """Load ABIs, find event ABIs matching configured topics, and store processed filter info."""
