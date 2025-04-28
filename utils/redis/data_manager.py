@@ -38,6 +38,7 @@ class RedisDataManager:
             return
         key = block_tx_htable_key(namespace, block_number)
         await self._redis.hset(key, tx_hash, receipt)
+        self._logger.info("🗄️ Added receipt to redis: {}", tx_hash)
 
     async def get_receipt(self, namespace: str, block_number: int, tx_hash: str) -> Optional[str]:
         """Get a transaction receipt."""
