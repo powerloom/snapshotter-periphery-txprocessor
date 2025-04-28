@@ -9,6 +9,7 @@ import json
 from config.loader import get_preloader_config, PRELOADER_CONFIG_FILE
 from utils.preloaders.manager import PreloaderManager
 import os
+from collections import defaultdict
 
 class TxProcessor:
     _redis: aioredis.Redis
@@ -19,6 +20,7 @@ class TxProcessor:
         self._logger = logger.bind(module='TxProcessor')
         self.queue_key = f'{settings.processor.redis_queue_key}:{settings.namespace}'
         self.block_timeout = settings.processor.redis_block_timeout
+        self.retry_counts = defaultdict(int)  # Track retry attempts per transaction
         
         # Load preloader hooks from configuration
         self._logger.info(f"🔧 Initializing TxProcessor with namespace: {settings.namespace}")
@@ -67,6 +69,13 @@ class TxProcessor:
                 self._logger.warning(f"⚠️ No receipt found for {tx_hash} (might be pending or invalid)")
         except Exception as e:
             self._logger.error(f"💥 Failed to process {tx_hash}: {str(e)}")
+            # Only retry if we haven't seen this transaction twice before
+            if self.retry_counts[tx_hash] < 2:
+                self.retry_counts[tx_hash] += 1
+                await self._redis.lpush(self.queue_key, tx_hash)
+                self._logger.info(f"🔄 Pushed {tx_hash} back to queue for retry (attempt {self.retry_counts[tx_hash]})")
+            else:
+                self._logger.error(f"❌ Max retries reached for {tx_hash}, giving up")
 
     async def start_consuming(self):
         """Continuously consume transaction hashes from Redis queue."""
