@@ -36,6 +36,14 @@ class TxProcessor:
         try:
              self._redis = await RedisPool.get_pool()
              # await self.rpc_helper.init() # Uncomment if RPC helper has async init
+             
+             # Initialize all preloader hooks
+             for hook in self.preloader_hooks:
+                 try:
+                     await hook.init()
+                 except Exception as e:
+                     self._logger.error(f"🔎 No init supported in preloader hook {hook.__class__.__name__}: {e}")
+                     
              self._logger.info("🚀 TxProcessor initialized successfully.")
         except Exception as e:
             self._logger.critical(f"❌ Failed to initialize TxProcessor: {e}")
@@ -68,7 +76,7 @@ class TxProcessor:
         while True:
             try:
                 # Blocking right pop from the list
-                result = await self._redis.brpop(self.queue_key, timeout=self.block_timeout)
+                result = await self._redis.brpop([self.queue_key], timeout=self.block_timeout)
                 if result:
                     _queue_name, tx_hash = result
                     self._logger.info(f"📨 Consumed tx hash from queue '{self.queue_key}': {tx_hash}")

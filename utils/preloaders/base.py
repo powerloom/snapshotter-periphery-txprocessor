@@ -4,6 +4,10 @@ from typing import Dict, Any
 class TxPreloaderHook(ABC):
     """Base class for transaction receipt preloader hooks."""
     
+    async def init(self) -> None:
+        """Initialize the preloader hook."""
+        pass
+    
     @abstractmethod
     async def process_receipt(self, tx_hash: str, receipt: Dict[str, Any], namespace: str) -> None:
         """Process a transaction receipt after it's fetched.
