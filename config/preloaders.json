@@ -6,9 +6,9 @@
             "class_name": "ReceiptDumper"
         },
         {
-          "task_type": "event_filter_hook",
-          "module": "utils.preloaders.event_filter",
-          "class_name": "EventFilter"
+            "task_type": "event_filter_hook",
+            "module": "utils.preloaders.event_filter",
+            "class_name": "EventFilter"
         }
     ]
-} 
+}

@@ -30,7 +30,6 @@ class ProcessedEventDetail(BaseModel):
 
 
 class ProcessedFilterData(BaseModel):
-    target_addresses_lower: Set[str]
     # Keys are standard 0x-prefixed, lowercase topic hashes
     events_by_topic: Dict[str, ProcessedEventDetail]
     redis_key_pattern: str

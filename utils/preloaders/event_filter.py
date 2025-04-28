@@ -5,12 +5,15 @@ from web3._utils.events import get_event_data
 from eth_utils.abi import event_abi_to_log_topic
 from eth_abi.codec import ABICodec
 from eth_abi.registry import registry as default_abi_registry
-
+from utils.code_detectors import UniswapV3PoolDetector
 from .base import TxPreloaderHook
 from config.loader import get_event_filter_config
 from utils.models.data_models import ProcessedFilterData, ProcessedEventDetail 
 from utils.logging import logger
 from utils.redis.redis_conn import RedisPool
+from web3 import Web3, AsyncHTTPProvider
+from web3.eth import AsyncEth
+from config.loader import get_core_config
 
 
 class EventFilter(TxPreloaderHook):
@@ -21,8 +24,53 @@ class EventFilter(TxPreloaderHook):
         self.filters_config = get_event_filter_config()
         self.processed_filters: Dict[str, ProcessedFilterData] = {}
         self._prepare_filters()
-        self.codec = ABICodec(default_abi_registry)
+        self.settings = get_core_config()
 
+        self.codec = ABICodec(default_abi_registry)
+        self.detected_pool_addresses: Dict[str, bool] = {}
+
+    def _get_web3_instance(self) -> Web3:
+        """Get a Web3 instance using the RPC URL from settings.
+        
+        Returns:
+            Web3: A configured Web3 instance
+        """
+        if hasattr(self, '_web3_instance'):
+            return self._web3_instance
+        
+        provider = AsyncHTTPProvider(self.settings.rpc.url)
+        self._web3_instance = Web3(provider)
+        self._web3_instance.eth = AsyncEth(self._web3_instance)
+        
+        return self._web3_instance
+        
+    async def _get_redis_pool(self):
+        """Get Redis connection pool.
+        
+        Returns:
+            Redis: A Redis connection instance
+        """
+        return await RedisPool.get_pool()
+
+    async def is_uniswap_v3_pool(self, address: str) -> bool:
+        """Check if the given address is a UniswapV3Pool contract.
+        
+        Args:
+            address: The address to check
+            
+        Returns:
+            bool: True if the address is a UniswapV3Pool contract, False otherwise
+        """
+        # Check cache first
+        address_lower = address.lower()
+        if address_lower in self.detected_pool_addresses:
+            return self.detected_pool_addresses[address_lower]
+
+        # Check if contract is a UniswapV3Pool
+        is_pool = await self._uniswap_v3_detector.is_uniswap_v3_pool(address)
+        self.detected_pool_addresses[address_lower] = is_pool
+        return is_pool
+    
     def _prepare_filters(self):
         """Load ABIs, find event ABIs matching configured topics, and store processed filter info."""
         workspace_root = Path(__file__).parent.parent.parent.parent
@@ -90,11 +138,7 @@ class EventFilter(TxPreloaderHook):
                     self._logger.error(f"  ❌ No valid event ABIs found for any configured topics in filter '{filter_def.filter_name}', skipping this filter.")
                     continue
 
-                target_addresses_lower = {addr.lower() for addr in filter_def.target_addresses}
-                self._logger.info(f"  🎯 Filter will target {len(target_addresses_lower)} addresses.")
-
                 self.processed_filters[filter_def.filter_name] = ProcessedFilterData(
-                    target_addresses_lower=target_addresses_lower,
                     events_by_topic=target_event_details,
                     redis_key_pattern=filter_def.redis_key_pattern
                 )
@@ -109,8 +153,11 @@ class EventFilter(TxPreloaderHook):
             return
 
         try:
-            redis = await RedisPool.get_pool()
-
+            web3 = self._get_web3_instance()
+            redis = await self._get_redis_pool()
+            if not hasattr(self, '_uniswap_v3_detector'):
+                self._uniswap_v3_detector = UniswapV3PoolDetector(web3, redis)
+            
             block_number_hex = receipt.get('blockNumber')
             tx_index_hex = receipt.get('transactionIndex')
             if block_number_hex is None or tx_index_hex is None:
@@ -148,7 +195,7 @@ class EventFilter(TxPreloaderHook):
                 log_index = int(log_index_hex, 16)
 
                 for filter_name, processed_filter in self.processed_filters.items():
-                    if log_address_lower in processed_filter.target_addresses_lower:
+                    if await self.is_uniswap_v3_pool(log_address_lower):
                         if log_topic0_standard in processed_filter.events_by_topic:
                             event_details = processed_filter.events_by_topic[log_topic0_standard]
                             event_abi = event_details.abi
@@ -179,7 +226,7 @@ class EventFilter(TxPreloaderHook):
                                     'topics': ['0x' + (t.hex() if hasattr(t, 'hex') else str(t)).lstrip('0x').lower() for t in log_topics],
                                     'data': log_entry.get('data', ''),
                                     'args': dict(decoded_event['args']),
-                                    '_score': score # Keep score in data for reference if needed
+                                    '_score': score  # Keep score in data for reference if needed
                                 }
                                 member = json.dumps(event_data_to_store)
 
@@ -189,7 +236,9 @@ class EventFilter(TxPreloaderHook):
 
                                 commands_by_key[redis_key][member] = score
                                 found_events_count += 1
-                                self._logger.debug(f"  -> Matched event '{event_name}' from filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index}). Score: {score}")
+                                log_msg = (f"  -> Matched event '{event_name}' from filter '{filter_name}' "
+                                          f"in tx {tx_hash} (LogIndex: {log_index}). Score: {score}")
+                                self._logger.debug(log_msg)
 
                             except Exception as decode_err:
                                 self._logger.error(
