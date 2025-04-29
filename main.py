@@ -1,9 +1,9 @@
 import asyncio
 from config.loader import get_core_config
+from rpc_helper.rpc import RpcHelper
 from utils.tx_processor import TxProcessor
 from utils.logging import logger, configure_file_logging
 from utils.redis.redis_conn import RedisPool
-from utils.rpc import RpcHelper
 
 async def main():
     processor = None
