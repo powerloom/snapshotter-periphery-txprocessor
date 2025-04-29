@@ -1,9 +1,18 @@
 {
   "namespace": "${NAMESPACE}",
   "rpc": {
-    "url": "${RPC_URL}",
+    "full_nodes": [{
+      "url": "${RPC_URL}"
+    }],
+    "archive_nodes": [],
+    "force_archive_blocks": 100,
     "retry": "${RPC_RETRY}",
-    "request_time_out": "${RPC_TIMEOUT}"
+    "request_time_out": "${RPC_TIMEOUT}",
+    "connection_limits":{
+      "max_connections": 100,
+      "max_keepalive_connections": 50,
+      "keepalive_expiry": 300
+    }
   },
   "redis": {
     "host": "${REDIS_HOST}",

@@ -16,12 +16,24 @@ class Redis(BaseModel):
     cluster_mode: bool = False
     data_retention: RedisDataRetentionConfig
 
-class RPCConfig(BaseModel):
-    """RPC configuration model."""
+class RPCNodeConfig(BaseModel):
+    """RPC node configuration model."""
     url: str
-    retry: int = 3
-    request_time_out: int = 15
-    # Add other RPC helper settings if needed
+
+class ConnectionLimits(BaseModel):
+    """Connection limits configuration model."""
+    max_connections: int = 100
+    max_keepalive_connections: int = 50
+    keepalive_expiry: int = 300
+
+class RPCConfigBase(BaseModel):
+    """Base RPC configuration model."""
+    full_nodes: List[RPCNodeConfig]
+    archive_nodes: Optional[List[RPCNodeConfig]]
+    force_archive_blocks: Optional[int]
+    retry: int
+    request_time_out: int
+    connection_limits: ConnectionLimits
 
 class Logs(BaseModel):
     """Logging configuration model."""
@@ -36,7 +48,7 @@ class TxProcessorConfig(BaseModel):
 
 class Settings(BaseModel):
     """Main settings configuration model."""
-    rpc: RPCConfig
+    rpc: RPCConfigBase
     redis: Redis
     logs: Logs
     processor: TxProcessorConfig
