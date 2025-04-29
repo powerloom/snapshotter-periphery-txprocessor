@@ -76,10 +76,16 @@ class EventFilter(TxPreloaderHook):
                     return True
                 # Only continue retrying on failure
             except Exception as e:
-                self._logger.warning(f"Attempt {attempt + 1}/{retry_count} failed for {address}: {e}")
+                self._logger.warning(
+                    f"Attempt {attempt + 1}/{retry_count} failed for {address}: {e}", 
+                    exc_info=True
+                )
                 if attempt == retry_count - 1:
                     # Log the final failure
-                    self._logger.error(f"All {retry_count} attempts failed to detect pool status for {address}")
+                    self._logger.error(
+                        f"All {retry_count} attempts failed to detect pool status for {address}", 
+                        exc_info=True
+                    )
         
         # After all retries failed
         self.detected_pool_addresses[address_lower] = False
@@ -203,13 +209,16 @@ class EventFilter(TxPreloaderHook):
                     self._logger.trace(f"Skipping invalid log entry in tx {tx_hash}: {log_entry}")
                     continue
 
-                log_address_lower = log_address.lower()
                 log_topic0_hex = log_topics[0].hex() if hasattr(log_topics[0], 'hex') else str(log_topics[0])
                 log_topic0_standard = ('0x' + log_topic0_hex.lower().lstrip('0x'))
                 log_index = int(log_index_hex, 16)
+                log_check_address = Web3.to_checksum_address(log_address)
 
                 for filter_name, processed_filter in self.processed_filters.items():
-                    if await self.is_uniswap_v3_pool(log_address_lower):
+                    if await self.is_uniswap_v3_pool(log_check_address):
+                        # add pool address to the list of pools active for that block
+                        key = f"active_pools:{block_number}:{namespace}"
+                        await redis.sadd(key, log_address)
                         if log_topic0_standard in processed_filter.events_by_topic:
                             event_details = processed_filter.events_by_topic[log_topic0_standard]
                             event_abi = event_details.abi
