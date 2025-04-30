@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field, validator
+from rpc_helper.utils.models.settings_model import RPCConfigBase
 from typing import Union, List, Dict, Optional
 
 class RedisDataRetentionConfig(BaseModel):
@@ -15,25 +16,6 @@ class Redis(BaseModel):
     ssl: bool = False
     cluster_mode: bool = False
     data_retention: RedisDataRetentionConfig
-
-class RPCNodeConfig(BaseModel):
-    """RPC node configuration model."""
-    url: str
-
-class ConnectionLimits(BaseModel):
-    """Connection limits configuration model."""
-    max_connections: int = 100
-    max_keepalive_connections: int = 50
-    keepalive_expiry: int = 300
-
-class RPCConfigBase(BaseModel):
-    """Base RPC configuration model."""
-    full_nodes: List[RPCNodeConfig]
-    archive_nodes: Optional[List[RPCNodeConfig]]
-    force_archive_blocks: Optional[int]
-    retry: int
-    request_time_out: int
-    connection_limits: ConnectionLimits
 
 class Logs(BaseModel):
     """Logging configuration model."""
