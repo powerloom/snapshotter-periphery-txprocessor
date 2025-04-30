@@ -1,9 +1,9 @@
 import asyncio
 import redis.exceptions
 from redis import asyncio as aioredis
+from rpc_helper.rpc import RpcHelper
 from utils.models.settings_model import Settings
 from utils.redis.redis_conn import RedisPool
-from utils.rpc import RpcHelper
 from utils.logging import logger
 import json
 from config.loader import get_preloader_config, PRELOADER_CONFIG_FILE
@@ -36,17 +36,19 @@ class TxProcessor:
     async def _init(self):
         """Initialize Redis connection and RPC helper."""
         try:
-             self._redis = await RedisPool.get_pool()
-             # await self.rpc_helper.init() # Uncomment if RPC helper has async init
-             
-             # Initialize all preloader hooks
-             for hook in self.preloader_hooks:
-                 try:
-                     await hook.init()
-                 except Exception as e:
-                     self._logger.error(f"🔎 No init supported in preloader hook {hook.__class__.__name__}: {e}")
-                     
-             self._logger.info("🚀 TxProcessor initialized successfully.")
+            self._redis = await RedisPool.get_pool()
+            # await self.rpc_helper.init() # Uncomment if RPC helper has async init
+            
+            # Initialize all preloader hooks
+            for hook in self.preloader_hooks:
+                try:
+                    await hook.init()
+                except Exception as e:
+                    self._logger.error(f"🔎 No init supported in preloader hook {hook.__class__.__name__}: {e}")
+
+            await self.rpc_helper.init()
+                    
+            self._logger.info("🚀 TxProcessor initialized successfully.")
         except Exception as e:
             self._logger.critical(f"❌ Failed to initialize TxProcessor: {e}")
             raise
@@ -55,7 +57,7 @@ class TxProcessor:
         """Fetch receipt for a single transaction hash."""
         self._logger.info(f"🔍 Processing transaction hash: {tx_hash}")
         try:
-            receipt = await self.rpc_helper.get_transaction_receipt(tx_hash)
+            receipt = await self.rpc_helper.get_transaction_receipt_json(tx_hash)
             if receipt:
                 self._logger.success(f"✅ Successfully fetched receipt for {tx_hash}")
                 

@@ -38,7 +38,7 @@ class EventFilter(TxPreloaderHook):
         if hasattr(self, '_web3_instance'):
             return self._web3_instance
         
-        provider = AsyncHTTPProvider(self.settings.rpc.url)
+        provider = AsyncHTTPProvider(self.settings.rpc.full_nodes[0].url)
         self._web3_instance = Web3(provider)
         self._web3_instance.eth = AsyncEth(self._web3_instance)
         

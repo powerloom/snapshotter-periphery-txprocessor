@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field, validator
+from rpc_helper.utils.models.settings_model import RPCConfigBase
 from typing import Union, List, Dict, Optional
 
 class RedisDataRetentionConfig(BaseModel):
@@ -16,13 +17,6 @@ class Redis(BaseModel):
     cluster_mode: bool = False
     data_retention: RedisDataRetentionConfig
 
-class RPCConfig(BaseModel):
-    """RPC configuration model."""
-    url: str
-    retry: int = 3
-    request_time_out: int = 15
-    # Add other RPC helper settings if needed
-
 class Logs(BaseModel):
     """Logging configuration model."""
     debug_mode: bool = False
@@ -36,7 +30,7 @@ class TxProcessorConfig(BaseModel):
 
 class Settings(BaseModel):
     """Main settings configuration model."""
-    rpc: RPCConfig
+    rpc: RPCConfigBase
     redis: Redis
     logs: Logs
     processor: TxProcessorConfig
