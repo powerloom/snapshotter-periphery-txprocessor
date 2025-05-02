@@ -13,7 +13,7 @@ httpx = "^0.27.1"
 web3 = "^6.17.1"
 pydantic = "^2.11.3"
 python-dotenv = "^1.0.0"
-rpc_helper = { git = "https://github.com/PowerLoom/rpc-helper.git", branch = "feat/dependency_update" }
+rpc_helper = { git = "https://github.com/PowerLoom/rpc-helper.git"}
 
 [build-system]
 requires = ["poetry-core"]
