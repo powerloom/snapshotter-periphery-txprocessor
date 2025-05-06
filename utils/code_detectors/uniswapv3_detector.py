@@ -164,6 +164,13 @@ class UniswapV3PoolDetector:
                 pool_metadata = await self.get_pool_metadata(address)
                 if not pool_metadata:
                     return False
+                
+
+                # TODO: Will be removed later
+                # Considering only WETH-* pairs for now
+                weth_address = self.web3.to_checksum_address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2')
+                if pool_metadata['token0']['address'] != weth_address and pool_metadata['token1']['address'] != weth_address:
+                    return False
 
                 await self._update_token_pools(pool_metadata['token0']['address'], pool_metadata['token1']['address'], address)
 
