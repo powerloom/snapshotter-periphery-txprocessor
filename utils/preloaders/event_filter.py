@@ -272,6 +272,9 @@ class EventFilter(TxPreloaderHook):
                 self._logger.error(f"💥 Unexpected error processing log entry in tx {tx_hash}: {log_proc_err} | Log: {log_entry}")
                 continue
 
+        # remove active pools for current_block - 60
+        key = f"active_pools:{block_number-60}:{namespace}"
+        await redis.delete(key)
         if found_events_count > 0:
             try:
                 pipeline = redis.pipeline(transaction=False)
