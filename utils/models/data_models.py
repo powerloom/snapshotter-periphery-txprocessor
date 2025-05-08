@@ -11,13 +11,8 @@ class EventFilterDefinition(BaseModel):
     abi_path: str
     event_topics: List[str] = Field(..., min_items=1)
     address_source: Optional[AddressSource] = None # Make optional to potentially support direct address lists later
-    target_addresses: List[str] = Field(default_factory=list)
+    target_addresses: List[str] = Field(default_factory=list, exclude=True)
     redis_key_pattern: str
-
-    # Exclude target_addresses from being loaded directly from config JSON
-    # It will be populated by the loader logic.
-    class Config:
-        fields = {'target_addresses': {'exclude': True}}
 
 
 class EventFiltersConfig(BaseModel):
