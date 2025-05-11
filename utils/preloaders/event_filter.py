@@ -219,6 +219,12 @@ class EventFilter(TxPreloaderHook):
                         # add pool address to the list of pools active for that block
                         key = f"active_pools:{block_number}:{namespace}"
                         await redis.sadd(key, log_address)
+
+                        current_day = await redis.get("current_day")
+                        if current_day is not None:
+                            current_day = int(current_day)
+                            await redis.zincrby(f"active_pools:day_{current_day}", 1, log_address)
+
                         if log_topic0_standard in processed_filter.events_by_topic:
                             event_details = processed_filter.events_by_topic[log_topic0_standard]
                             event_abi = event_details.abi
