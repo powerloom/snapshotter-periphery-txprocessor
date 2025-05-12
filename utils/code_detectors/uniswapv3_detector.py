@@ -232,6 +232,9 @@ class UniswapV3PoolDetector:
             token0_address = await pool_contract.functions.token0().call()
             token1_address = await pool_contract.functions.token1().call()
 
+            token0_address = Web3.to_checksum_address(token0_address)
+            token1_address = Web3.to_checksum_address(token1_address)
+
             # Get tokens metadata
             token0_metadata = await self._get_erc20_metadata(token0_address)
             if not token0_metadata:
@@ -241,6 +244,7 @@ class UniswapV3PoolDetector:
                 return None
 
             factory_address = await pool_contract.functions.factory().call()
+            factory_address = Web3.to_checksum_address(factory_address)
 
             # Get pool fee
             fee = await pool_contract.functions.fee().call()
