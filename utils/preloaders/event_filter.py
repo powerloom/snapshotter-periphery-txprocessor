@@ -62,9 +62,8 @@ class EventFilter(TxPreloaderHook):
             bool: True if the address is a UniswapV3Pool contract, False otherwise
         """
         # Check cache first
-        address_lower = address.lower()
-        if address_lower in self.detected_pool_addresses:
-            return self.detected_pool_addresses[address_lower]
+        if address in self.detected_pool_addresses:
+            return self.detected_pool_addresses[address]
 
         # Retry up to 3 times before marking as non-pool
         retry_count = 3
@@ -72,7 +71,7 @@ class EventFilter(TxPreloaderHook):
             try:
                 is_pool = await self._uniswap_v3_detector.is_uniswap_v3_pool(address)
                 if is_pool:
-                    self.detected_pool_addresses[address_lower] = True
+                    self.detected_pool_addresses[address] = True
                     return True
                 # Only continue retrying on failure
             except Exception as e:
@@ -88,7 +87,7 @@ class EventFilter(TxPreloaderHook):
                     )
         
         # After all retries failed
-        self.detected_pool_addresses[address_lower] = False
+        self.detected_pool_addresses[address] = False
         return False
     
     def _prepare_filters(self):
