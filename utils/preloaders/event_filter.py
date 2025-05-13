@@ -239,7 +239,7 @@ class EventFilter(TxPreloaderHook):
                                 # Prepare key (per address) and member for Redis ZSet
                                 redis_key = processed_filter.redis_key_pattern.format(
                                     namespace=namespace,
-                                    address=log_address
+                                    address=log_check_address
                                 )
 
                                 # Member is the JSON string of event details
