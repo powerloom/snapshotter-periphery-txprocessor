@@ -234,7 +234,7 @@ class EventFilter(TxPreloaderHook):
                                 decoded_event = get_event_data(self.codec, event_abi, log_entry)
 
                                 # Calculate composite score
-                                score = (block_number * SCORE_BLOCK_MULTIPLIER) + log_index
+                                score = (block_number * SCORE_BLOCK_MULTIPLIER) + tx_index
 
                                 # Prepare key (per address) and member for Redis ZSet
                                 redis_key = processed_filter.redis_key_pattern.format(
