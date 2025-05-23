@@ -285,7 +285,10 @@ class EventFilter(TxPreloaderHook):
                 pipeline = redis.pipeline(transaction=False)
                 for r_key, member_score_map in commands_by_key.items():
                     pipeline.zadd(r_key, mapping=member_score_map)
+                    max_score_to_remove_inclusive = ((block_number - 19) * SCORE_BLOCK_MULTIPLIER) - 1
+                    pipeline.zremrangebyscore(r_key, '-inf', max_score_to_remove_inclusive)
+
                 await pipeline.execute()
-                self._logger.success(f"💾 Stored {found_events_count} filtered events from tx {tx_hash} into Redis ZSets (Key: {list(commands_by_key.keys())}).")
+                self._logger.success(f"💾 Stored {found_events_count} filtered events from tx {tx_hash} into Redis ZSets (Key: {list(commands_by_key.keys())}) and pruned entries older than 20 blocks.")
             except Exception as redis_err:
-                self._logger.error(f"❌ Failed to store filtered events from tx {tx_hash} to Redis: {redis_err}")
+                self._logger.error(f"❌ Failed to store/prune filtered events from tx {tx_hash} to Redis: {redis_err}")
