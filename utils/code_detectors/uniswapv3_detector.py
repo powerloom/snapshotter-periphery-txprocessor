@@ -165,15 +165,11 @@ class UniswapV3PoolDetector:
                 if not pool_metadata:
                     return False
                 
-
                 # TODO: Will be removed later
                 # Considering only WETH-* pairs for now
                 weth_address = self.web3.to_checksum_address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2')
                 if pool_metadata['token0']['address'] != weth_address and pool_metadata['token1']['address'] != weth_address:
                     return False
-
-                await self._update_token_pools(pool_metadata['token0']['address'], pool_metadata['token1']['address'], address)
-                await self._update_active_tokens([pool_metadata['token0']['address'], pool_metadata['token1']['address']])
 
                 # Verify addresses are valid
                 Web3.to_checksum_address(pool_metadata['factory'])
@@ -273,35 +269,6 @@ class UniswapV3PoolDetector:
             # self.logger.error(f"Error getting token metadata for pool {pool_address}: {str(e)}")
             return None
         
-    async def _update_active_tokens(self, token_addresses: List[str]):
-        """Update the active tokens in Redis using a sorted set.
-
-        This method maintains a sorted set of active tokens where:
-        - The score represents the number of times a token has appeared in pools
-        - Tokens are automatically sorted by their frequency
-
-        Args:
-            token_addresses: List of token addresses to update
-        """
-        current_day = await self.redis.get("current_day")
-        if current_day is not None:
-            current_day = int(current_day)
-            # Increment score in zset for each token
-            for token in token_addresses:
-                await self.redis.zincrby(f"active_tokens:day_{current_day}", 1, token)
-
-    async def _update_token_pools(self, token_0_address: str, token_1_address: str, pool_address: str):
-        """Update the token pools for a given token pair.
-
-        Args:
-            token_0_address: The address of the first token
-            token_1_address: The address of the second token
-            pool_address: The address of the pool
-        """
-        # Add pool address to token0 and token1 pools
-        await self.redis.sadd(f'token_pools:{token_0_address}', pool_address)
-        await self.redis.sadd(f'token_pools:{token_1_address}', pool_address)
-
     async def _get_erc20_metadata(self, token_address: Union[str, Address]) -> Dict[str, Any]:
         """Get ERC20 token metadata (name, symbol, decimals).
 

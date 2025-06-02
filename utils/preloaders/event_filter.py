@@ -14,6 +14,7 @@ from utils.redis.redis_conn import RedisPool
 from web3 import Web3, AsyncHTTPProvider
 from web3.eth import AsyncEth
 from config.loader import get_core_config
+from redis import asyncio as aioredis
 
 
 class EventFilter(TxPreloaderHook):
@@ -51,7 +52,36 @@ class EventFilter(TxPreloaderHook):
             Redis: A Redis connection instance
         """
         return await RedisPool.get_pool()
+    
+    async def _update_active_tokens_and_pool(self, token_addresses: List[str], pool_address: str, redis: aioredis.Redis, block_number: int, namespace: str):
+        """Update the active tokens in Redis using a sorted set.
 
+        This method maintains a sorted set of active tokens where:
+        - The score represents the number of times a token has appeared in pools
+        - Tokens are automatically sorted by their frequency
+
+        Args:
+            token_addresses: List of token addresses to update
+        """
+        pipeline = redis.pipeline()
+        current_day = await redis.get("current_day")
+        if current_day is not None:
+            current_day = int(current_day)
+            # Increment score in zset for each token
+            for token in token_addresses:
+                pipeline.zincrby(f"active_tokens:day_{current_day}", 1, token)
+            
+            pipeline.sadd(f'token_pools:{token_addresses[0]}', pool_address)
+            pipeline.sadd(f'token_pools:{token_addresses[1]}', pool_address)
+            
+            pipeline.zincrby(f"active_pools:day_{current_day}", 1, pool_address)
+            pipeline.sadd(f"active_pools:{block_number}:{namespace}", pool_address)
+        
+        # remove active pools for current_block - 60
+        pipeline.delete(f"active_pools:{block_number-60}:{namespace}")
+
+        await pipeline.execute()
+            
     async def is_uniswap_v3_pool(self, address: str) -> bool:
         """Check if the given address is a UniswapV3Pool contract.
         
@@ -60,8 +90,7 @@ class EventFilter(TxPreloaderHook):
             
         Returns:
             bool: True if the address is a UniswapV3Pool contract, False otherwise
-        """
-        # Check cache first
+        """        
         if address in self.detected_pool_addresses:
             return self.detected_pool_addresses[address]
 
@@ -69,6 +98,7 @@ class EventFilter(TxPreloaderHook):
         retry_count = 3
         for attempt in range(retry_count):
             try:
+                
                 is_pool = await self._uniswap_v3_detector.is_uniswap_v3_pool(address)
                 if is_pool:
                     self.detected_pool_addresses[address] = True
@@ -215,14 +245,13 @@ class EventFilter(TxPreloaderHook):
 
                 for filter_name, processed_filter in self.processed_filters.items():
                     if await self.is_uniswap_v3_pool(log_check_address):
-                        # add pool address to the list of pools active for that block
-                        key = f"active_pools:{block_number}:{namespace}"
-                        await redis.sadd(key, log_address)
+                        # Check cache first
+                        pool_metadata = await self._uniswap_v3_detector.get_pool_metadata(log_check_address)
+                        token0_address = Web3.to_checksum_address(pool_metadata['token0']['address'])
+                        token1_address = Web3.to_checksum_address(pool_metadata['token1']['address'])
+                        await self._update_active_tokens_and_pool([token0_address, token1_address], log_check_address, redis, block_number, namespace)
 
-                        current_day = await redis.get("current_day")
-                        if current_day is not None:
-                            current_day = int(current_day)
-                            await redis.zincrby(f"active_pools:day_{current_day}", 1, log_address)
+                        # add pool address to the list of pools active for that block
 
                         if log_topic0_standard in processed_filter.events_by_topic:
                             event_details = processed_filter.events_by_topic[log_topic0_standard]
@@ -277,9 +306,6 @@ class EventFilter(TxPreloaderHook):
                 self._logger.error(f"💥 Unexpected error processing log entry in tx {tx_hash}: {log_proc_err} | Log: {log_entry}")
                 continue
 
-        # remove active pools for current_block - 60
-        key = f"active_pools:{block_number-60}:{namespace}"
-        await redis.delete(key)
         if found_events_count > 0:
             try:
                 pipeline = redis.pipeline(transaction=False)
