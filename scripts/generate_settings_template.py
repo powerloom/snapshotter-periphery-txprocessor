@@ -31,7 +31,8 @@ def generate_template():
         "processor": {
             "redis_queue_key": "${PROCESSOR_QUEUE_KEY}",
             "redis_block_timeout": "${PROCESSOR_BLOCK_TIMEOUT}"
-        }
+        },
+        "weth_address": "${WETH_ADDRESS}"
     }
 
     # Ensure config directory exists

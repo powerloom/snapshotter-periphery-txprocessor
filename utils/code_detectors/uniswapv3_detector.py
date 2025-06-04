@@ -1,9 +1,10 @@
 import binascii
+import json
 from typing import Union, List, Dict, Any
 from web3 import Web3
 from eth_typing import HexStr, Address
 from redis import asyncio as aioredis
-import json
+
 from utils.logging import logger
 
 logger = logger.bind(module='UniswapV3PoolDetector')
@@ -15,7 +16,7 @@ class UniswapV3PoolDetector:
     This class provides functionality to identify UniswapV3Pool contracts by their bytecode signature.
     """
 
-    def __init__(self, web3: Web3, redis: aioredis.Redis):
+    def __init__(self, web3: Web3, redis: aioredis.Redis, weth_address: str):
         """Initialize the UniswapV3PoolDetector.
 
         Args:
@@ -25,6 +26,7 @@ class UniswapV3PoolDetector:
         self.web3 = web3
         self.redis = redis
         self.logger = logger.bind(context="UniswapV3PoolDetector")
+        self.weth_address = self.web3.to_checksum_address(weth_address)
 
         # Unique function signatures present in UniswapV3Pool contracts
         # These are specific keccak256 hashes of function signatures that are characteristic of the contract
@@ -165,10 +167,8 @@ class UniswapV3PoolDetector:
                 if not pool_metadata:
                     return False
                 
-                # TODO: Will be removed later
                 # Considering only WETH-* pairs for now
-                weth_address = self.web3.to_checksum_address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2')
-                if pool_metadata['token0']['address'] != weth_address and pool_metadata['token1']['address'] != weth_address:
+                if pool_metadata['token0']['address'] != self.weth_address and pool_metadata['token1']['address'] != self.weth_address:
                     return False
 
                 # Verify addresses are valid

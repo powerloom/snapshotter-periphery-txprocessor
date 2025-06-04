@@ -209,8 +209,9 @@ class EventFilter(TxPreloaderHook):
         try:
             web3 = self._get_web3_instance()
             redis = await self._get_redis_pool()
+            weth_address = self.settings.weth_address
             if not hasattr(self, '_uniswap_v3_detector'):
-                self._uniswap_v3_detector = UniswapV3PoolDetector(web3, redis)
+                self._uniswap_v3_detector = UniswapV3PoolDetector(web3, redis, weth_address)
             
             block_number_hex = receipt.get('blockNumber')
             tx_index_hex = receipt.get('transactionIndex')
