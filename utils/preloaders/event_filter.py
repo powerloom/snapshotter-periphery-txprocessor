@@ -76,9 +76,14 @@ class EventFilter(TxPreloaderHook):
             
             pipeline.zincrby(f"active_pools:day_{current_day}", 1, pool_address)
             pipeline.sadd(f"active_pools:{block_number}:{namespace}", pool_address)
+            pipeline.zincrby(f"active_pools_per_block:{block_number}:{namespace}", 1, pool_address)
+            pipeline.zincrby(f"active_tokens_per_block:{block_number}:{namespace}", 1, token_addresses[0])
+            pipeline.zincrby(f"active_tokens_per_block:{block_number}:{namespace}", 1, token_addresses[1])
         
         # remove active pools for current_block - 60
         pipeline.delete(f"active_pools:{block_number-60}:{namespace}")
+        pipeline.delete(f"active_pools_per_block:{block_number-60}:{namespace}")
+        pipeline.delete(f"active_tokens_per_block:{block_number-60}:{namespace}")
 
         await pipeline.execute()
             
