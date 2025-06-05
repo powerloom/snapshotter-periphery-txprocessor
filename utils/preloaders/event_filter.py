@@ -250,16 +250,16 @@ class EventFilter(TxPreloaderHook):
                 log_check_address = Web3.to_checksum_address(log_address)
 
                 for filter_name, processed_filter in self.processed_filters.items():
-                    if await self.is_uniswap_v3_pool(log_check_address):
-                        # Check cache first
-                        pool_metadata = await self._uniswap_v3_detector.get_pool_metadata(log_check_address)
-                        token0_address = Web3.to_checksum_address(pool_metadata['token0']['address'])
-                        token1_address = Web3.to_checksum_address(pool_metadata['token1']['address'])
-                        await self._update_active_tokens_and_pool([token0_address, token1_address], log_check_address, redis, block_number, namespace)
+                    if log_topic0_standard in processed_filter.events_by_topic:
+                        if await self.is_uniswap_v3_pool(log_check_address):
+                            # Check cache first
+                            pool_metadata = await self._uniswap_v3_detector.get_pool_metadata(log_check_address)
+                            token0_address = Web3.to_checksum_address(pool_metadata['token0']['address'])
+                            token1_address = Web3.to_checksum_address(pool_metadata['token1']['address'])
+                            await self._update_active_tokens_and_pool([token0_address, token1_address], log_check_address, redis, block_number, namespace)
 
-                        # add pool address to the list of pools active for that block
+                            # add pool address to the list of pools active for that block
 
-                        if log_topic0_standard in processed_filter.events_by_topic:
                             event_details = processed_filter.events_by_topic[log_topic0_standard]
                             event_abi = event_details.abi
                             event_name = event_details.name
