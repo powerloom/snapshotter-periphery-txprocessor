@@ -386,31 +386,3 @@ class UniswapV3PoolDetector:
             '0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c',  # Burn
             '0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633',  # Flash
         ]
-
-
-if __name__ == "__main__":
-    import asyncio
-    
-    async def main():
-        rpc_url = "https://rpc-eth-lb.blockvigil.com/v1/ca71e8fda51e1985672de5f5349f5363e369a7be"
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
-        
-        try:
-            redis = await aioredis.from_url("redis://localhost:6379")
-            await redis.ping()
-        except Exception as e:
-            print(f"Failed to connect to Redis: {e}")
-            raise
-            
-        detector = UniswapV3PoolDetector(web3, redis)
-        
-        # Test with a known Uniswap V3 pool
-        test_address = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"  # USDC/WETH 0.05%
-        result = await detector.is_uniswap_v3_pool(test_address)
-        print(f"Is UniswapV3Pool ({test_address}): {result}")
-        
-        # Test metadata retrieval
-        metadata = await detector.get_pool_metadata(test_address)
-        print(f"Pool metadata: {metadata}")
-    
-    asyncio.run(main())
