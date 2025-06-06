@@ -16,7 +16,7 @@ class UniswapV3PoolDetector:
     signature verification, and metadata validation.
     """
 
-    def __init__(self, web3: Union[Web3, AsyncWeb3], redis: aioredis.Redis):
+    def __init__(self, web3: Union[Web3, AsyncWeb3], redis: aioredis.Redis, weth_address: str):
         """Initialize the UniswapV3PoolDetector.
 
         Args:
@@ -26,6 +26,7 @@ class UniswapV3PoolDetector:
         self.web3 = web3
         self.redis = redis
         self.logger = logger.bind(context="UniswapV3PoolDetector")
+        self.weth_address = Web3.to_checksum_address(weth_address)
 
         # Function signatures that MUST be present in UniswapV3Pool contracts
         self.REQUIRED_FUNCTION_SIGNATURES = {
@@ -181,10 +182,9 @@ class UniswapV3PoolDetector:
                 return False
 
             # TODO: Remove this WETH filter once testing is complete
-            weth_address = Web3.to_checksum_address('0x4200000000000000000000000000000000000006')
             token0_addr = pool_metadata['token0']['address']
             token1_addr = pool_metadata['token1']['address']
-            if token0_addr != weth_address and token1_addr != weth_address:
+            if token0_addr != self.weth_address and token1_addr != self.weth_address:
                 self.logger.info(f"Neither token0 nor token1 is WETH for {address}")
                 await self._cache_result(cache_key, False)
                 return False
