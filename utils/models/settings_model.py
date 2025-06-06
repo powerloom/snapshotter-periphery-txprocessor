@@ -35,6 +35,7 @@ class Settings(BaseModel):
     logs: Logs
     processor: TxProcessorConfig
     namespace: str
+    weth_address: str
 
 class Preloader(BaseModel):
     """Preloader configuration model."""
