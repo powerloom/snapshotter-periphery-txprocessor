@@ -1,72 +1,47 @@
-import binascii
-import json
 from typing import Union, List, Dict, Any
-from web3 import Web3
+from web3 import Web3, AsyncWeb3
 from eth_typing import HexStr, Address
 from redis import asyncio as aioredis
-
+import json
 from utils.logging import logger
 
 logger = logger.bind(module='UniswapV3PoolDetector')
 
 
 class UniswapV3PoolDetector:
-    """Detector for UniswapV3Pool contracts.
+    """Production-ready detector for UniswapV3Pool contracts.
 
-    This class provides functionality to identify UniswapV3Pool contracts by their bytecode signature.
+    This class provides robust functionality to identify UniswapV3Pool contracts
+    using multiple verification methods including bytecode analysis, function
+    signature verification, and metadata validation.
     """
 
-    def __init__(self, web3: Web3, redis: aioredis.Redis, weth_address: str):
+    def __init__(self, web3: Union[Web3, AsyncWeb3], redis: aioredis.Redis):
         """Initialize the UniswapV3PoolDetector.
 
         Args:
-            web3: Web3 instance connected to a node
+            web3: Web3 or AsyncWeb3 instance connected to a node
             redis: Redis instance for caching results
         """
         self.web3 = web3
         self.redis = redis
         self.logger = logger.bind(context="UniswapV3PoolDetector")
-        self.weth_address = self.web3.to_checksum_address(weth_address)
 
-        # Unique function signatures present in UniswapV3Pool contracts
-        # These are specific keccak256 hashes of function signatures that are characteristic of the contract
-        self.FUNCTION_SIGNATURES = {
-            # fee() function signature
+        # Function signatures that MUST be present in UniswapV3Pool contracts
+        self.REQUIRED_FUNCTION_SIGNATURES = {
             '0xddca3f43': 'fee()',
-            # slot0() function signature
             '0x3850c7bd': 'slot0()',
-            # factory() function signature
             '0xc45a0155': 'factory()',
-            # token0() function signature
             '0x0dfe1681': 'token0()',
-            # token1() function signature
             '0xd21220a7': 'token1()',
-            # liquidity() function signature
-            '0x1a686502': 'liquidity()'
+            '0x1a686502': 'liquidity()',
+            '0x70cf754a': 'tickSpacing()',
+            '0x128acb08': 'feeGrowthGlobal0X128()',
+            '0xa138ed29': 'feeGrowthGlobal1X128()'
         }
 
-        # Common events in UniswapV3Pool contracts - topic0 hashes
-        self.POOL_EVENT_TOPICS = {
-            # Swap event
-            '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67': 'Swap',
-            # Mint event
-            '0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde': 'Mint',
-            # Burn event
-            '0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c': 'Burn',
-            # Flash event
-            '0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633': 'Flash'
-        }
-
-        # Deterministic bytecode fragments that are unique to UniswapV3Pool
-        # These are fragments of deployed bytecode that uniquely identify UniswapV3Pool contracts
-        self.BYTECODE_SIGNATURES = [
-            # This is a distinctive code pattern from UniswapV3Pool implementation
-            '3d5989525d3d5989525d3d5989525d',  # Distinctive stack manipulation pattern
-            '4946554e49535741505f5633',  # Hex for "IUNISWAP_V3" found in Uniswap contracts
-        ]
-
-        # Minimal ABI for function verification
-        self.MINIMAL_ABI = [
+        # Minimal ABI for pool verification
+        self.POOL_ABI = [
             {
                 "inputs": [],
                 "name": "factory",
@@ -94,11 +69,33 @@ class UniswapV3PoolDetector:
                 "outputs": [{"internalType": "uint24", "name": "", "type": "uint24"}],
                 "stateMutability": "view",
                 "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "tickSpacing",
+                "outputs": [{"internalType": "int24", "name": "", "type": "int24"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "slot0",
+                "outputs": [
+                    {"internalType": "uint160", "name": "sqrtPriceX96", "type": "uint160"},
+                    {"internalType": "int24", "name": "tick", "type": "int24"},
+                    {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
+                    {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
+                    {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
+                    {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
+                    {"internalType": "bool", "name": "unlocked", "type": "bool"}
+                ],
+                "stateMutability": "view",
+                "type": "function"
             }
         ]
 
-        # Minimal ABI for ERC20 token metadata
-        self.ERC20_MINIMAL_ABI = [
+        # ERC20 ABI for token verification
+        self.ERC20_ABI = [
             {
                 "inputs": [],
                 "name": "name",
@@ -122,8 +119,17 @@ class UniswapV3PoolDetector:
             }
         ]
 
+        # Valid Uniswap V3 fee tiers
+        self.VALID_FEE_TIERS = {100, 500, 3000, 10000}
+
     async def is_uniswap_v3_pool(self, address: Union[str, Address]) -> bool:
         """Check if the given address is a UniswapV3Pool contract.
+
+        Uses multiple verification methods to ensure accuracy:
+        1. Bytecode function signature analysis
+        2. Contract metadata validation
+        3. Fee tier validation
+        4. Tick spacing validation
 
         Args:
             address: The address to check
@@ -131,121 +137,180 @@ class UniswapV3PoolDetector:
         Returns:
             bool: True if the address is a UniswapV3Pool contract, False otherwise
         """
-        logger.info(f"Checking if {address} is a UniswapV3Pool contract")
         try:
             # Normalize the address
             address = Web3.to_checksum_address(address)
+            self.logger.info(f"Checking if {address} is a UniswapV3Pool contract")
 
-            # Get the contract bytecode - must use await because get_code returns a coroutine
-            bytecode = await self.web3.eth.get_code(address)
+            # Check cache first
+            cache_key = f'uniswap_v3_pool_check:{address}'
+            cached_result = await self.redis.get(cache_key)
+            if cached_result is not None:
+                result = json.loads(cached_result)
+                self.logger.info(f"Cache hit for {address}: {result}")
+                return result
 
-            if not bytecode or bytecode == '0x' or bytecode == HexStr('0x'):
+            # Step 1: Check if contract exists
+            if not await self._has_contract_code(address):
+                await self._cache_result(cache_key, False)
                 return False
 
-            # Convert to hex string without 0x prefix for easier searching
-            bytecode_hex = binascii.hexlify(bytecode).decode('ascii')
-
-            # Method 1: Check for bytecode signatures
-            for signature in self.BYTECODE_SIGNATURES:
-                if signature in bytecode_hex.lower():
-                    return True
-
-            # Method 2: Check for function signatures
-            # Count how many UniswapV3Pool function signatures are found in the bytecode
-            signature_count = 0
-            for signature in self.FUNCTION_SIGNATURES:
-                if signature in bytecode_hex.lower():
-                    signature_count += 1
-
-            # If we find at least 4 of the 6 expected function signatures, it's likely a UniswapV3Pool
-            if signature_count >= 4:
-                return True
-
-            # Method 3: Additional verification by calling key view functions
-            try:
-                pool_metadata = await self.get_pool_metadata(address)
-                if not pool_metadata:
-                    return False
-                
-                # Considering only WETH-* pairs for now
-                if pool_metadata['token0']['address'] != self.weth_address and pool_metadata['token1']['address'] != self.weth_address:
-                    return False
-
-                # Verify addresses are valid
-                Web3.to_checksum_address(pool_metadata['factory'])
-                Web3.to_checksum_address(pool_metadata['token0']['address'])
-                Web3.to_checksum_address(pool_metadata['token1']['address'])
-                Web3.to_checksum_address(pool_metadata['factory'])
-
-                # Uniswap V3 fees are usually one of these values: 500 (0.05%), 3000 (0.3%), 10000 (1%)
-                # But we'll just check it's a valid uint24
-                if isinstance(pool_metadata['fee'], int) and 0 <= pool_metadata['fee'] < 2**24:
-                    return True
-
-                # If we got here without exception but fee isn't valid, this might not be a real pool
+            # Step 2: Check bytecode for function signatures
+            if not await self._has_required_function_signatures(address):
+                self.logger.info(f"Required function signatures not found for {address}")
+                await self._cache_result(cache_key, False)
                 return False
 
-            except Exception as e:
-                # Function calls failed, not a UniswapV3Pool
+            # Step 3: Verify contract metadata
+            pool_metadata = await self.get_pool_metadata(address)
+            if not pool_metadata:
+                self.logger.info(f"Could not get pool metadata for {address}")
+                await self._cache_result(cache_key, False)
                 return False
+
+            # Step 4: Validate fee tier
+            if not self._is_valid_fee_tier(pool_metadata['fee']):
+                self.logger.info(f"Invalid fee tier {pool_metadata['fee']} for {address}")
+                await self._cache_result(cache_key, False)
+                return False
+
+            # Step 5: Additional validation - check tick spacing
+            if not self._is_valid_tick_spacing(pool_metadata['fee'], pool_metadata.get('tick_spacing')):
+                self.logger.info(f"Invalid tick spacing for fee {pool_metadata['fee']} for {address}")
+                await self._cache_result(cache_key, False)
+                return False
+
+            # TODO: Remove this WETH filter once testing is complete
+            weth_address = Web3.to_checksum_address('0x4200000000000000000000000000000000000006')
+            token0_addr = pool_metadata['token0']['address']
+            token1_addr = pool_metadata['token1']['address']
+            if token0_addr != weth_address and token1_addr != weth_address:
+                self.logger.info(f"Neither token0 nor token1 is WETH for {address}")
+                await self._cache_result(cache_key, False)
+                return False
+
+            # All checks passed
+            self.logger.info(f"Successfully verified {address} as UniswapV3Pool")
+            await self._cache_result(cache_key, True)
+            return True
 
         except Exception as e:
-            # Any other exception means it's not a valid contract or has other issues
+            self.logger.error(f"Error checking if {address} is a UniswapV3Pool contract: {str(e)}")
+            await self._cache_result(cache_key, False)
             return False
 
-    def get_key_event_topics(self) -> List[str]:
-        """Get the list of event topic signatures that are characteristic of UniswapV3Pool contracts.
+    async def _has_contract_code(self, address: str) -> bool:
+        """Check if the address has contract bytecode."""
+        try:
+            bytecode = await self.web3.eth.get_code(address)
+            return bytecode and bytecode != '0x' and bytecode != HexStr('0x')
+        except Exception as e:
+            self.logger.error(f"Error getting bytecode for {address}: {str(e)}")
+            return False
 
-        Returns:
-            List[str]: List of topic0 signatures (keccak256 hashes of event definitions)
-        """
-        return list(self.POOL_EVENT_TOPICS.keys())
+    async def _has_required_function_signatures(self, address: str) -> bool:
+        """Check if the contract bytecode contains required function signatures."""
+        try:
+            bytecode = await self.web3.eth.get_code(address)
+            if not bytecode:
+                return False
+
+            # Convert to hex string without 0x prefix for searching
+            bytecode_hex = bytecode.hex().lower()
+
+            # Count matching function signatures
+            signature_matches = 0
+            for signature in self.REQUIRED_FUNCTION_SIGNATURES:
+                # Remove 0x prefix and search in bytecode
+                sig_hex = signature[2:].lower()
+                if sig_hex in bytecode_hex:
+                    signature_matches += 1
+
+            # Require at least 6 out of 9 signatures to be present
+            # This allows for some variations in contract implementations
+            required_matches = 6
+            success = signature_matches >= required_matches
+            
+            self.logger.info(f"Found {signature_matches} signatures in {address}")
+            
+            return success
+
+        except Exception as e:
+            self.logger.error(f"Error checking function signatures for {address}: {str(e)}")
+            return False
+
+    def _is_valid_fee_tier(self, fee: int) -> bool:
+        """Check if the fee is a valid Uniswap V3 fee tier."""
+        return isinstance(fee, int) and fee in self.VALID_FEE_TIERS
+
+    def _is_valid_tick_spacing(self, fee: int, tick_spacing: int) -> bool:
+        """Check if tick spacing matches the expected value for the fee tier."""
+        if not isinstance(tick_spacing, int):
+            return False
+            
+        # Expected tick spacing for each fee tier
+        expected_tick_spacing = {
+            100: 1,
+            500: 10,
+            3000: 60,
+            10000: 200
+        }
+        
+        return expected_tick_spacing.get(fee) == tick_spacing
+
+    async def _cache_result(self, cache_key: str, result: bool) -> None:
+        """Cache the verification result."""
+        try:
+            await self.redis.set(cache_key, json.dumps(result), ex=3600)  # 1 hour cache
+        except Exception as e:
+            self.logger.warning(f"Failed to cache result: {str(e)}")
 
     async def get_pool_metadata(self, pool_address: Union[str, Address]) -> Dict[str, Any]:
-        """Get token0 and token1 metadata from a UniswapV3Pool including name, symbol, and decimals.
+        """Get comprehensive metadata from a UniswapV3Pool.
 
         Args:
             pool_address: The address of the UniswapV3Pool contract
 
         Returns:
-            Dict containing token0 and token1 metadata or None if not a valid pool or tokens
+            Dict containing pool metadata or None if not a valid pool
         """
         try:
-            # Normalize the address
             pool_address = Web3.to_checksum_address(pool_address)
 
-            # Check Redis cache first
+            # Check cache first
             cache_key = f'pool_metadata:{pool_address}'
             cached_data = await self.redis.get(cache_key)
-
             if cached_data:
                 return json.loads(cached_data)
 
-            # Get the pool contract
-            pool_contract = self.web3.eth.contract(address=pool_address, abi=self.MINIMAL_ABI)
+            # Create pool contract instance
+            pool_contract = self.web3.eth.contract(address=pool_address, abi=self.POOL_ABI)
 
-            # Get token addresses
-            token0_address = await pool_contract.functions.token0().call()
-            token1_address = await pool_contract.functions.token1().call()
+            # Get basic pool data
+            try:
+                token0_address = await pool_contract.functions.token0().call()
+                token1_address = await pool_contract.functions.token1().call()
+                factory_address = await pool_contract.functions.factory().call()
+                fee = await pool_contract.functions.fee().call()
+                tick_spacing = await pool_contract.functions.tickSpacing().call()
+            except Exception as e:
+                self.logger.error(f"Failed to get basic pool data for {pool_address}: {str(e)}")
+                return None
 
+            # Normalize addresses
             token0_address = Web3.to_checksum_address(token0_address)
             token1_address = Web3.to_checksum_address(token1_address)
-
-            # Get tokens metadata
-            token0_metadata = await self._get_erc20_metadata(token0_address)
-            if not token0_metadata:
-                return None
-            token1_metadata = await self._get_erc20_metadata(token1_address)
-            if not token1_metadata:
-                return None
-
-            factory_address = await pool_contract.functions.factory().call()
             factory_address = Web3.to_checksum_address(factory_address)
 
-            # Get pool fee
-            fee = await pool_contract.functions.fee().call()
+            # Get token metadata
+            token0_metadata = await self._get_erc20_metadata(token0_address)
+            token1_metadata = await self._get_erc20_metadata(token1_address)
 
-            # Build complete pool metadata
+            if not token0_metadata or not token1_metadata:
+                self.logger.error(f"Failed to get token metadata for pool {pool_address}")
+                return None
+
+            # Build metadata
             pool_metadata = {
                 'address': pool_address,
                 'token0': {
@@ -257,45 +322,47 @@ class UniswapV3PoolDetector:
                     **token1_metadata
                 },
                 'fee': fee,
+                'tick_spacing': tick_spacing,
                 'factory': factory_address
             }
 
-            # Cache the result in Redis with 1 hour expiry
+            # Cache the result
             await self.redis.set(cache_key, json.dumps(pool_metadata), ex=3600)
-
             return pool_metadata
 
         except Exception as e:
-            # self.logger.error(f"Error getting token metadata for pool {pool_address}: {str(e)}")
+            self.logger.error(f"Error getting pool metadata for {pool_address}: {str(e)}")
             return None
-        
+
     async def _get_erc20_metadata(self, token_address: Union[str, Address]) -> Dict[str, Any]:
-        """Get ERC20 token metadata (name, symbol, decimals).
-
-        Args:
-            token_address: The address of the ERC20 token
-
-        Returns:
-            Dict containing token metadata (name, symbol, decimals)
-        """
+        """Get ERC20 token metadata with robust error handling."""
         try:
-            # Normalize the address
             token_address = Web3.to_checksum_address(token_address)
 
-            # Check Redis cache first
+            # Check cache first
             cache_key = f'erc20_metadata:{token_address}'
             cached_data = await self.redis.get(cache_key)
-
             if cached_data:
                 return json.loads(cached_data)
 
-            # Create token contract instance
-            token_contract = self.web3.eth.contract(address=token_address, abi=self.ERC20_MINIMAL_ABI)
+            # Create token contract
+            token_contract = self.web3.eth.contract(address=token_address, abi=self.ERC20_ABI)
 
-            # Call view functions to get metadata
-            name = await token_contract.functions.name().call()
-            symbol = await token_contract.functions.symbol().call()
-            decimals = await token_contract.functions.decimals().call()
+            # Get metadata with fallbacks
+            try:
+                name = await token_contract.functions.name().call()
+            except Exception:
+                name = "Unknown Token"
+
+            try:
+                symbol = await token_contract.functions.symbol().call()
+            except Exception:
+                symbol = "UNKNOWN"
+
+            try:
+                decimals = await token_contract.functions.decimals().call()
+            except Exception:
+                decimals = 18  # Default to 18 decimals
 
             metadata = {
                 'name': name,
@@ -303,12 +370,19 @@ class UniswapV3PoolDetector:
                 'decimals': decimals
             }
 
-            # Cache the result in Redis with 1 day expiry (since token metadata rarely changes)
+            # Cache for 24 hours
             await self.redis.set(cache_key, json.dumps(metadata), ex=86400)
-
             return metadata
 
         except Exception as e:
-            # self.logger.error(f"Error getting metadata for token {token_address}: {str(e)}")
-            # Return default values if we can't fetch the metadata
+            self.logger.error(f"Error getting ERC20 metadata for {token_address}: {str(e)}")
             return None
+
+    def get_key_event_topics(self) -> List[str]:
+        """Get the list of event topic signatures characteristic of UniswapV3Pool contracts."""
+        return [
+            '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67',  # Swap
+            '0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde',  # Mint
+            '0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c',  # Burn
+            '0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633',  # Flash
+        ]
