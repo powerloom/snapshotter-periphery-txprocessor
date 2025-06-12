@@ -64,21 +64,14 @@ class EventFilter(TxPreloaderHook):
             token_addresses: List of token addresses to update
         """
         pipeline = redis.pipeline()
-        current_day = await redis.get("current_day")
-        if current_day is not None:
-            current_day = int(current_day)
-            # Increment score in zset for each token
-            for token in token_addresses:
-                pipeline.zincrby(f"active_tokens:day_{current_day}", 1, token)
             
-            pipeline.sadd(f'token_pools:{token_addresses[0]}', pool_address)
-            pipeline.sadd(f'token_pools:{token_addresses[1]}', pool_address)
+        pipeline.sadd(f'token_pools:{token_addresses[0]}', pool_address)
+        pipeline.sadd(f'token_pools:{token_addresses[1]}', pool_address)
             
-            pipeline.zincrby(f"active_pools:day_{current_day}", 1, pool_address)
-            pipeline.sadd(f"active_pools:{block_number}:{namespace}", pool_address)
-            pipeline.zincrby(f"active_pools_per_block:{block_number}:{namespace}", 1, pool_address)
-            pipeline.zincrby(f"active_tokens_per_block:{block_number}:{namespace}", 1, token_addresses[0])
-            pipeline.zincrby(f"active_tokens_per_block:{block_number}:{namespace}", 1, token_addresses[1])
+        pipeline.sadd(f"active_pools:{block_number}:{namespace}", pool_address)
+        pipeline.zincrby(f"active_pools_per_block:{block_number}:{namespace}", 1, pool_address)
+        pipeline.zincrby(f"active_tokens_per_block:{block_number}:{namespace}", 1, token_addresses[0])
+        pipeline.zincrby(f"active_tokens_per_block:{block_number}:{namespace}", 1, token_addresses[1])
         
         # remove active pools for current_block - 60
         pipeline.delete(f"active_pools:{block_number-60}:{namespace}")
