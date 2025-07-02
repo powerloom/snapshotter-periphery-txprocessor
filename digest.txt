@@ -1,0 +1,1772 @@
+Directory structure:
+└── snapshotter-periphery-txprocessor/
+    ├── README.md
+    ├── docker-compose.yaml
+    ├── Dockerfile
+    ├── main.py
+    ├── pyproject.toml
+    ├── .env.example
+    ├── config/
+    │   ├── loader.py
+    │   ├── preloaders.json
+    │   └── settings.template.json
+    ├── scripts/
+    │   ├── entrypoint.py
+    │   └── generate_settings_template.py
+    └── utils/
+        ├── logging.py
+        ├── tx_processor.py
+        ├── code_detectors/
+        │   ├── __init__.py
+        │   └── uniswapv3_detector.py
+        ├── models/
+        │   ├── data_models.py
+        │   └── settings_model.py
+        ├── preloaders/
+        │   ├── __init__.py
+        │   ├── base.py
+        │   ├── event_filter.py
+        │   ├── manager.py
+        │   └── receipt_dumper.py
+        └── redis/
+            ├── data_manager.py
+            ├── redis_conn.py
+            └── redis_keys.py
+
+================================================
+FILE: README.md
+================================================
+# snapshotter-periphery-txprocessor
+
+
+
+================================================
+FILE: docker-compose.yaml
+================================================
+version: '3.8'
+
+services:
+  tx_processor:
+    build: .
+    container_name: tx_processor_service
+    environment:
+      - RPC_URL
+      - RPC_RETRY
+      - RPC_TIMEOUT
+      - REDIS_HOST
+      - REDIS_PORT
+      - REDIS_DB
+      - REDIS_PASSWORD
+      - REDIS_SSL
+      - REDIS_CLUSTER
+      - REDIS_MAX_BLOCKS
+      - REDIS_TTL_SECONDS
+      - LOG_DEBUG
+      - LOG_TO_FILES
+      - LOG_LEVEL
+      - PROCESSOR_QUEUE_KEY
+      - PROCESSOR_BLOCK_TIMEOUT
+      - TEST_MODE=${TEST_MODE:-false}  # Add test mode env var for consistency
+    env_file:
+      - .env
+    volumes:
+      - ${CONFIG_PATH:-./config}:/app/shared_config:ro
+      - ${COMPUTES_PATH:-./computes}:/app/computes:ro
+      - ./logs:/app/logs
+    depends_on:
+      - redis_tx
+    restart: unless-stopped
+
+  redis_tx:
+    image: redis:7-alpine
+    container_name: redis_txprocessor
+    command: >
+      sh -c "redis-server --port ${REDIS_PORT:-6379} --requirepass \"$${REDIS_PASSWORD?No Redis Password Set}\""
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli -h ${REDIS_HOST:-localhost} -p ${REDIS_PORT:-6379} ping | grep -q PONG && ! redis-cli -h ${REDIS_HOST:-localhost} -p ${REDIS_PORT:-6379} info persistence | grep -q 'loading:1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    volumes:
+      - ./redis_data:/data
+    # Add optional password and memory configurations
+    environment:
+      - REDIS_PASSWORD
+      - REDIS_HOST
+    profiles:
+      - local
+      - test
+
+  rate-limiter:
+    image: ${RATE_LIMITER_IMAGE:-ghcr.io/powerloom/rate-limiter:dockerify}
+    environment:
+      - DEFAULT_RATE_LIMIT=${DEFAULT_RATE_LIMIT:-1000}
+    command: poetry run uvicorn app:app --host 0.0.0.0 --port ${RATE_LIMITER_PORT:-8000}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${RATE_LIMITER_PORT:-8000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - local
+      - test
+    env_file:
+      - .env
+
+
+================================================
+FILE: Dockerfile
+================================================
+# Use the same base Python version as BlockFetcher
+FROM python:3.12-slim
+
+# Install system dependencies needed for building some Python packages
+RUN apt-get update && \
+    apt-get install -y gcc build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Install Poetry
+# Consider installing a specific version if needed: pip install poetry==<version>
+RUN pip install poetry
+
+# Copy dependency files
+COPY pyproject.toml poetry.lock ./
+
+# Configure Poetry to not create virtual environment in container
+RUN poetry config virtualenvs.create false
+
+# Install dependencies (use --only main for production builds)
+RUN poetry install --no-root
+
+# Create logs directory relative to WORKDIR
+RUN mkdir logs
+
+# Copy application code (ensure all needed dirs like utils, config, scripts are copied)
+COPY . .
+
+# Make entrypoint script executable
+RUN chmod +x scripts/entrypoint.py
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+
+# Use entrypoint script to configure and start the service
+CMD ["python", "scripts/entrypoint.py"]
+
+
+
+================================================
+FILE: main.py
+================================================
+import asyncio
+from config.loader import get_core_config
+from rpc_helper.rpc import RpcHelper
+from utils.tx_processor import TxProcessor
+from utils.logging import logger, configure_file_logging
+from utils.redis.redis_conn import RedisPool
+
+async def main():
+    processor = None
+    try:
+        settings = get_core_config()
+        # Reconfigure logging with settings
+        configure_file_logging(
+            write_to_files=settings.logs.write_to_files,
+        )
+        logger.info("🚀 Starting Transaction Processor Service...")
+        processor = TxProcessor(settings)
+        await processor.start_consuming()
+    except Exception as e:
+        logger.critical(f"🆘 Service failed to start or crashed: {e}")
+        raise
+    finally:
+        logger.info("Shutting down resources...")
+        if processor and processor.rpc_helper:
+            await processor.rpc_helper.close()
+        await RedisPool.close()
+        logger.info("Shutdown complete.")
+
+if __name__ == "__main__":    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Service interrupted by user.")
+    except Exception as e:
+        logger.critical(f"🆘 Service crashed: {e}")
+        raise
+
+
+================================================
+FILE: pyproject.toml
+================================================
+[tool.poetry]
+name = "txprocessor"
+version = "0.1.0"
+description = "Processes transactions for events etc as needed by preloaders and computes"
+authors = ["anomit <anomit@powerloom.io>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+redis = {extras = ["hiredis"], version = "^5.0.1"}
+loguru = "^0.7.3"
+httpx = "^0.27.1"
+web3 = "^6.17.1"
+pydantic = "^2.11.3"
+python-dotenv = "^1.0.0"
+rpc_helper = { git = "https://github.com/PowerLoom/rpc-helper.git"}
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+
+
+================================================
+FILE: .env.example
+================================================
+NAMESPACE=UNISWAPV2
+
+# RPC Settings
+RPC_URL=http://localhost:8545
+RPC_RETRY=3
+RPC_TIMEOUT=15
+
+# Redis Settings
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
+REDIS_SSL=false
+REDIS_CLUSTER=false
+
+# Data retention settings
+REDIS_MAX_BLOCKS=100
+REDIS_TTL_SECONDS=86400
+# Logging Settings
+LOG_DEBUG=false
+LOG_TO_FILES=true
+LOG_LEVEL=INFO
+
+# Processor Settings
+PROCESSOR_QUEUE_KEY=pending_transactions
+PROCESSOR_BLOCK_TIMEOUT=0 # 0 = Block indefinitely
+
+# Event Filter Settings
+CONFIG_PATH=../config
+COMPUTES_PATH=../computes
+EVENT_FILTER_CONFIG_PATH=/app/shared_config/event_filters.example.json
+
+# Rate Limiter Settings
+RATE_LIMITER_IMAGE=rate-limiter
+RATE_LIMITER_PORT=8000
+DEFAULT_RATE_LIMIT=1000
+
+
+
+================================================
+FILE: config/loader.py
+================================================
+import os
+import json
+from functools import lru_cache
+from pathlib import Path
+from utils.models.settings_model import Settings, PreloaderConfig
+from utils.models.data_models import EventFiltersConfig
+from utils.logging import logger
+
+CONFIG_DIR = os.path.dirname(__file__)
+SETTINGS_FILE = os.path.join(CONFIG_DIR, 'settings.json')
+PRELOADER_CONFIG_FILE = os.path.join(CONFIG_DIR, 'preloaders.json')
+EVENT_FILTER_CONFIG_PATH = os.getenv('EVENT_FILTER_CONFIG_PATH', '/app/shared_config/event_filters.example.json')
+
+_logger = logger.bind(module='ConfigLoader')
+
+@lru_cache()
+def get_core_config() -> Settings:
+    """Load settings from the settings.json file."""
+    _logger.info(f"📖 Loading settings from: {SETTINGS_FILE}")
+    if not os.path.exists(SETTINGS_FILE):
+        _logger.error(f"❌ Settings file not found at {SETTINGS_FILE}")
+        raise RuntimeError(f"Settings file not found at {SETTINGS_FILE}. Ensure the entrypoint script has run.")
+    try:
+        with open(SETTINGS_FILE, 'r') as f:
+            settings_dict = json.load(f)
+        settings = Settings(**settings_dict)
+        _logger.success("✅ Successfully loaded settings")
+        return settings
+    except json.JSONDecodeError as e:
+        _logger.error(f"❌ Error decoding settings file: {e}")
+        raise RuntimeError(f"Error decoding settings file ({SETTINGS_FILE}): {str(e)}")
+    except Exception as e:
+        _logger.error(f"❌ Error loading settings: {e}")
+        raise RuntimeError(f"Error loading settings from {SETTINGS_FILE}: {str(e)}")
+
+@lru_cache()
+def get_preloader_config() -> PreloaderConfig:
+    """Load preloader configuration from the preloaders.json file."""
+    _logger.info(f"📖 Loading preloader config from: {PRELOADER_CONFIG_FILE}")
+    if not os.path.exists(PRELOADER_CONFIG_FILE):
+        _logger.error(f"❌ Preloader config file not found")
+        raise RuntimeError(f"Preloader config file not found at {PRELOADER_CONFIG_FILE}.")
+    try:
+        with open(PRELOADER_CONFIG_FILE, 'r') as f:
+            config_dict = json.load(f)
+        config = PreloaderConfig(**config_dict)
+        _logger.success(f"✅ Successfully loaded {len(config.preloaders)} preloader configurations")
+        return config
+    except json.JSONDecodeError as e:
+        _logger.error(f"❌ Error decoding preloader config: {e}")
+        raise RuntimeError(f"Error decoding preloader config file ({PRELOADER_CONFIG_FILE}): {str(e)}")
+    except Exception as e:
+        _logger.error(f"❌ Error loading preloader config: {e}")
+        raise RuntimeError(f"Error loading preloader config from {PRELOADER_CONFIG_FILE}: {str(e)}")
+
+@lru_cache()
+def get_event_filter_config() -> EventFiltersConfig:
+    """Load event filter configuration, expecting event_topics."""
+    service_root = Path(__file__).parent.parent
+    # Resolve potential relative paths from workspace root
+    if not EVENT_FILTER_CONFIG_PATH.startswith('/'):
+        # Assuming workspace root is one level above service root
+        workspace_root = service_root.parent 
+        full_config_path = (workspace_root / EVENT_FILTER_CONFIG_PATH).resolve()
+    else:
+        full_config_path = Path(EVENT_FILTER_CONFIG_PATH)
+    
+    _logger.info(f"📖 Loading event filter config from: {full_config_path}")
+    if not full_config_path.exists():
+        _logger.error(f"❌ Event filter config file not found at {full_config_path}")
+        # Provide a helpful default path if not found
+        default_path = (service_root.parent / 'config/event_filters.example.json').resolve()
+        _logger.info(f"ℹ️ Default path would be: {default_path}")
+        raise RuntimeError(f"Event filter config file not found at {full_config_path}. Check EVENT_FILTER_CONFIG_PATH env var.")
+
+    try:
+        with open(full_config_path, 'r') as f:
+            config_dict = json.load(f)
+
+        config = EventFiltersConfig(**config_dict)
+
+        return config
+    except json.JSONDecodeError as e:
+        _logger.error(f"❌ Error decoding event filter config file '{full_config_path}': {e}")
+        raise RuntimeError(f"Error decoding event filter config file '{full_config_path}': {str(e)}")
+    except Exception as e: # Catch Pydantic ValidationError etc.
+        _logger.error(f"❌ Error loading/validating event filter config '{full_config_path}': {type(e).__name__} - {e}")
+        raise RuntimeError(f"Error loading/validating event filter config from {full_config_path}: {str(e)}")
+
+
+
+================================================
+FILE: config/preloaders.json
+================================================
+{
+    "preloaders": [
+        {
+            "task_type": "receipt_dump",
+            "module": "utils.preloaders.receipt_dumper",
+            "class_name": "ReceiptDumper"
+        },
+        {
+            "task_type": "event_filter_hook",
+            "module": "utils.preloaders.event_filter",
+            "class_name": "EventFilter"
+        }
+    ]
+}
+
+
+================================================
+FILE: config/settings.template.json
+================================================
+{
+  "namespace": "${NAMESPACE}",
+  "rpc": {
+    "full_nodes": [{
+      "url": "${RPC_URL}"
+    }],
+    "archive_nodes": [],
+    "force_archive_blocks": 100,
+    "retry": "${RPC_RETRY}",
+    "request_time_out": "${RPC_TIMEOUT}",
+    "connection_limits":{
+      "max_connections": 100,
+      "max_keepalive_connections": 50,
+      "keepalive_expiry": 300
+    }
+  },
+  "redis": {
+    "host": "${REDIS_HOST}",
+    "port": "${REDIS_PORT}",
+    "db": "${REDIS_DB}",
+    "password": "${REDIS_PASSWORD}",
+    "ssl": "${REDIS_SSL}",
+    "cluster_mode": "${REDIS_CLUSTER}",
+    "data_retention": {
+      "max_blocks": "${REDIS_MAX_BLOCKS}",
+      "ttl_seconds": "${REDIS_TTL_SECONDS}"
+    }
+  },
+  "logs": {
+    "debug_mode": "${LOG_DEBUG}",
+    "write_to_files": "${LOG_TO_FILES}",
+    "level": "${LOG_LEVEL}"
+  },
+  "processor": {
+    "redis_queue_key": "${PROCESSOR_QUEUE_KEY}",
+    "redis_block_timeout": "${PROCESSOR_BLOCK_TIMEOUT}"
+  },
+  "weth_address": "${WETH_ADDRESS}"
+}
+
+
+================================================
+FILE: scripts/entrypoint.py
+================================================
+#!/usr/bin/env python3
+import os
+import json
+import subprocess
+from string import Template
+from dotenv import load_dotenv
+
+CONFIG_DIR = 'config' # Relative to WORKDIR (/app)
+TEMPLATE_FILE = os.path.join(CONFIG_DIR, 'settings.template.json')
+SETTINGS_FILE = os.path.join(CONFIG_DIR, 'settings.json')
+
+def fill_template():
+    """Fill settings template with environment variables"""
+    load_dotenv() # Load .env file if present
+
+    if not os.path.exists(TEMPLATE_FILE):
+        print(f"ERROR: Template file not found at {TEMPLATE_FILE}")
+        exit(1)
+
+    with open(TEMPLATE_FILE, 'r') as f:
+        template = Template(f.read())
+
+    print("--- Substituting settings template ---")
+    try:
+        filled_str = template.substitute(os.environ)
+        # Validate if it's valid JSON before writing
+        json.loads(filled_str)
+    except KeyError as e:
+         print(f"ERROR: Missing environment variable for substitution: {e}. Check template and env vars.")
+         exit(1)
+    except json.JSONDecodeError as e:
+         print(f"ERROR: Substituted template resulted in invalid JSON: {e}")
+         print("--- Substituted Content ---")
+         print(filled_str)
+         print("--------------------------")
+         exit(1)
+    except Exception as e:
+         print(f"ERROR: Failed during template substitution: {e}")
+         exit(1)
+
+    print(f"Writing final settings to {SETTINGS_FILE}")
+    with open(SETTINGS_FILE, 'w') as f:
+        f.write(filled_str)
+    print("--- Settings substitution complete ---")
+
+
+if __name__ == "__main__":
+    fill_template()
+    # Execute main application using python directly
+    print("Executing main application: python main.py")
+    # Using execvp to replace the current process is often better in containers
+    # os.execvp("python", ["python", "main.py"])
+    # Using subprocess for simplicity here:
+    result = subprocess.run(["python", "main.py"], check=False)
+    exit(result.returncode)
+
+
+
+================================================
+FILE: scripts/generate_settings_template.py
+================================================
+import json
+import os
+
+# Define the template structure matching utils/models/settings_model.py
+def generate_template():
+    """Generate template settings.json with placeholder values"""
+    template = {
+        "namespace": "${NAMESPACE}",
+        "rpc": {
+            "url": "${RPC_URL}",
+            "retry": "${RPC_RETRY}",
+            "request_time_out": "${RPC_TIMEOUT}"
+        },
+        "redis": {
+            "host": "${REDIS_HOST}",
+            "port": "${REDIS_PORT}",
+            "db": "${REDIS_DB}",
+            "password": "${REDIS_PASSWORD}",
+            "ssl": "${REDIS_SSL}",
+            "cluster_mode": "${REDIS_CLUSTER}",
+            "data_retention": {
+                "max_blocks": "${REDIS_MAX_BLOCKS}",
+                "ttl_seconds": "${REDIS_TTL_SECONDS}"
+            }
+        },
+        "logs": {
+            "debug_mode": "${LOG_DEBUG}",
+            "write_to_files": "${LOG_TO_FILES}",
+            "level": "${LOG_LEVEL}"
+        },
+        "processor": {
+            "redis_queue_key": "${PROCESSOR_QUEUE_KEY}",
+            "redis_block_timeout": "${PROCESSOR_BLOCK_TIMEOUT}"
+        },
+        "weth_address": "${WETH_ADDRESS}"
+    }
+
+    # Ensure config directory exists
+    config_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config') # Assumes scripts/ is one level below root
+    os.makedirs(config_dir, exist_ok=True)
+    template_path = os.path.join(config_dir, 'settings.template.json')
+
+    with open(template_path, 'w') as f:
+        json.dump(template, f, indent=2)
+    print(f"Generated template at {template_path}")
+
+if __name__ == "__main__":
+    generate_template()
+
+
+================================================
+FILE: utils/logging.py
+================================================
+import os
+import sys
+from pathlib import Path
+from loguru import logger
+
+# Create logs directory if it doesn't exist
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(exist_ok=True)
+
+# Remove default logger
+logger.remove()
+
+# Define severity levels and their corresponding files
+SEVERITY_FILES = {
+    "ERROR": "error.log",
+    "WARNING": "warning.log",
+    "CRITICAL": "critical.log",
+    "INFO": "info.log",
+    "DEBUG": "debug.log",
+    "TRACE": "trace.log",
+    "SUCCESS": "success.log"
+}
+
+# Common log format for files
+FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+
+# Common log format for console (with colors)
+CONSOLE_FORMAT = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+
+# Add console loggers for different severities
+logger.add(
+    sys.stdout,
+    format=CONSOLE_FORMAT,
+    level="INFO",
+    colorize=True,
+    filter=lambda record: record["level"].no < logger.level("WARNING").no
+)
+
+logger.add(
+    sys.stderr,
+    format=CONSOLE_FORMAT,
+    level="WARNING",
+    colorize=True,
+    filter=lambda record: record["level"].no >= logger.level("WARNING").no
+)
+
+def configure_file_logging(write_to_files: bool = True):
+    """Configure file-based logging based on settings."""
+    if write_to_files:
+        # Add file loggers for each severity level
+        for level, filename in SEVERITY_FILES.items():
+            logger.add(
+                LOGS_DIR / filename,
+                rotation="100 MB",
+                retention="7 days",
+                compression="zip",
+                format=FILE_FORMAT,
+                level=level,
+                backtrace=True,
+                diagnose=True,
+                filter=lambda record, level=level: record["level"].name == level
+            )
+
+# Export the configured logger
+__all__ = ["logger", "configure_file_logging"]
+
+
+
+================================================
+FILE: utils/tx_processor.py
+================================================
+import asyncio
+import redis.exceptions
+from redis import asyncio as aioredis
+from rpc_helper.rpc import RpcHelper
+from utils.models.settings_model import Settings
+from utils.redis.redis_conn import RedisPool
+from utils.logging import logger
+import json
+from config.loader import get_preloader_config, PRELOADER_CONFIG_FILE
+from utils.preloaders.manager import PreloaderManager
+import os
+from collections import defaultdict
+
+class TxProcessor:
+    _redis: aioredis.Redis
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.rpc_helper = RpcHelper(settings.rpc)
+        self._logger = logger.bind(module='TxProcessor')
+        self.queue_key = f'{settings.processor.redis_queue_key}:{settings.namespace}'
+        self.block_timeout = settings.processor.redis_block_timeout
+        self.retry_counts = defaultdict(int)  # Track retry attempts per transaction
+        
+        # Load preloader hooks from configuration
+        self._logger.info(f"🔧 Initializing TxProcessor with namespace: {settings.namespace}")
+        self._logger.info(f"📋 Using Redis queue key: {self.queue_key}")
+        self._logger.info(f"⏱️ Redis block timeout: {self.block_timeout}s")
+        self._logger.info(f"📁 Loading preloader config from: {os.path.abspath(PRELOADER_CONFIG_FILE)}")
+        preloader_config = get_preloader_config()
+        self.preloader_hooks = PreloaderManager.load_hooks(preloader_config)
+        self._logger.info(f"🔌 Loaded {len(self.preloader_hooks)} preloader hooks:")
+        for hook in self.preloader_hooks:
+            self._logger.info(f"  ├─ {hook.__class__.__name__}")
+
+    async def _init(self):
+        """Initialize Redis connection and RPC helper."""
+        try:
+            self._redis = await RedisPool.get_pool()
+            # await self.rpc_helper.init() # Uncomment if RPC helper has async init
+            
+            # Initialize all preloader hooks
+            for hook in self.preloader_hooks:
+                try:
+                    await hook.init()
+                except Exception as e:
+                    self._logger.error(f"🔎 No init supported in preloader hook {hook.__class__.__name__}: {e}")
+
+            await self.rpc_helper.init()
+                    
+            self._logger.info("🚀 TxProcessor initialized successfully.")
+        except Exception as e:
+            self._logger.critical(f"❌ Failed to initialize TxProcessor: {e}")
+            raise
+
+    async def process_transaction(self, tx_hash: str):
+        """Fetch receipt for a single transaction hash."""
+        self._logger.info(f"🔍 Processing transaction hash: {tx_hash}")
+        try:
+            receipt = await self.rpc_helper.get_transaction_receipt_json(tx_hash)
+            if receipt:
+                self._logger.success(f"✅ Successfully fetched receipt for {tx_hash}")
+                
+                # Run all preloader hooks
+                for hook in self.preloader_hooks:
+                    try:
+                        await hook.process_receipt(tx_hash, receipt, self.settings.namespace)
+                    except Exception as e:
+                        self._logger.error(f"💥 Error in preloader hook {hook.__class__.__name__}: {e}")
+            else:
+                self._logger.warning(f"⚠️ No receipt found for {tx_hash} (might be pending or invalid)")
+        except Exception as e:
+            self._logger.error(f"💥 Failed to process {tx_hash}: {str(e)}")
+            # Only retry if we haven't seen this transaction twice before
+            if self.retry_counts[tx_hash] < 2:
+                self.retry_counts[tx_hash] += 1
+                await self._redis.lpush(self.queue_key, tx_hash)
+                self._logger.info(f"🔄 Pushed {tx_hash} back to queue for retry (attempt {self.retry_counts[tx_hash]})")
+            else:
+                self._logger.error(f"❌ Max retries reached for {tx_hash}, giving up")
+
+    async def start_consuming(self):
+        """Continuously consume transaction hashes from Redis queue."""
+        await self._init()
+        self._logger.info(f"🔄 Starting consumer for Redis queue '{self.queue_key}' (timeout: {self.block_timeout}s)")
+
+        while True:
+            try:
+                # Blocking right pop from the list
+                result = await self._redis.brpop([self.queue_key], timeout=self.block_timeout)
+                if result:
+                    _queue_name, tx_hash = result
+                    self._logger.info(f"📨 Consumed tx hash from queue '{self.queue_key}': {tx_hash}")
+                    asyncio.create_task(self.process_transaction(tx_hash))
+                else:
+                    # Timeout occurred (only if self.block_timeout > 0)
+                    self._logger.trace("⏳ No new transaction hash received within timeout, looping...")
+                    pass # Loop continues, will block again on brpop
+
+            except (redis.exceptions.ConnectionError, ConnectionRefusedError, asyncio.TimeoutError) as conn_err:
+                self._logger.error(f"❌ Redis connection error: {conn_err}. Retrying connection...")
+                await RedisPool.close() # Ensure old pool is closed
+                await asyncio.sleep(5)
+                await self._init() # Re-initialize connection
+            except Exception as e:
+                self._logger.error(f"🔥 Unexpected error consuming from Redis: {type(e).__name__} - {e}")
+                # Optional: Add a delay before retrying on other errors
+                await asyncio.sleep(2)
+
+
+
+================================================
+FILE: utils/code_detectors/__init__.py
+================================================
+from .uniswapv3_detector import UniswapV3PoolDetector
+
+__all__ = ["UniswapV3PoolDetector"] 
+
+
+================================================
+FILE: utils/code_detectors/uniswapv3_detector.py
+================================================
+from typing import Union, List, Dict, Any
+from web3 import Web3, AsyncWeb3
+from eth_typing import HexStr, Address
+from redis import asyncio as aioredis
+import json
+from utils.logging import logger
+
+logger = logger.bind(module='UniswapV3PoolDetector')
+
+
+class UniswapV3PoolDetector:
+    """Production-ready detector for UniswapV3Pool contracts.
+
+    This class provides robust functionality to identify UniswapV3Pool contracts
+    using multiple verification methods including bytecode analysis, function
+    signature verification, and metadata validation.
+    """
+
+    def __init__(self, web3: Union[Web3, AsyncWeb3], redis: aioredis.Redis, weth_address: str):
+        """Initialize the UniswapV3PoolDetector.
+
+        Args:
+            web3: Web3 or AsyncWeb3 instance connected to a node
+            redis: Redis instance for caching results
+        """
+        self.web3 = web3
+        self.redis = redis
+        self.logger = logger.bind(context="UniswapV3PoolDetector")
+        self.weth_address = Web3.to_checksum_address(weth_address)
+
+        # Function signatures that MUST be present in UniswapV3Pool contracts
+        self.REQUIRED_FUNCTION_SIGNATURES = {
+            '0xddca3f43': 'fee()',
+            '0x3850c7bd': 'slot0()',
+            '0xc45a0155': 'factory()',
+            '0x0dfe1681': 'token0()',
+            '0xd21220a7': 'token1()',
+            '0x1a686502': 'liquidity()',
+            '0x70cf754a': 'tickSpacing()',
+            '0x128acb08': 'feeGrowthGlobal0X128()',
+            '0xa138ed29': 'feeGrowthGlobal1X128()'
+        }
+
+        # Minimal ABI for pool verification
+        self.POOL_ABI = [
+            {
+                "inputs": [],
+                "name": "factory",
+                "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "token0",
+                "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "token1",
+                "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "fee",
+                "outputs": [{"internalType": "uint24", "name": "", "type": "uint24"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "tickSpacing",
+                "outputs": [{"internalType": "int24", "name": "", "type": "int24"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "slot0",
+                "outputs": [
+                    {"internalType": "uint160", "name": "sqrtPriceX96", "type": "uint160"},
+                    {"internalType": "int24", "name": "tick", "type": "int24"},
+                    {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
+                    {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
+                    {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
+                    {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
+                    {"internalType": "bool", "name": "unlocked", "type": "bool"}
+                ],
+                "stateMutability": "view",
+                "type": "function"
+            }
+        ]
+
+        # ERC20 ABI for token verification
+        self.ERC20_ABI = [
+            {
+                "inputs": [],
+                "name": "name",
+                "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "symbol",
+                "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+                "stateMutability": "view",
+                "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "decimals",
+                "outputs": [{"internalType": "uint8", "name": "", "type": "uint8"}],
+                "stateMutability": "view",
+                "type": "function"
+            }
+        ]
+
+        # Valid Uniswap V3 fee tiers
+        self.VALID_FEE_TIERS = {100, 500, 3000, 10000}
+
+    async def is_uniswap_v3_pool(self, address: Union[str, Address]) -> bool:
+        """Check if the given address is a UniswapV3Pool contract.
+
+        Uses multiple verification methods to ensure accuracy:
+        1. Bytecode function signature analysis
+        2. Contract metadata validation
+        3. Fee tier validation
+        4. Tick spacing validation
+
+        Args:
+            address: The address to check
+
+        Returns:
+            bool: True if the address is a UniswapV3Pool contract, False otherwise
+        """
+        try:
+            # Normalize the address
+            address = Web3.to_checksum_address(address)
+            self.logger.info(f"Checking if {address} is a UniswapV3Pool contract")
+
+            # Check cache first
+            cache_key = f'uniswap_v3_pool_check:{address}'
+            cached_result = await self.redis.get(cache_key)
+            if cached_result is not None:
+                result = json.loads(cached_result)
+                self.logger.info(f"Cache hit for {address}: {result}")
+                return result
+
+            # Step 1: Check if contract exists
+            if not await self._has_contract_code(address):
+                await self._cache_result(cache_key, False)
+                return False
+
+            # Step 2: Check bytecode for function signatures
+            if not await self._has_required_function_signatures(address):
+                self.logger.info(f"Required function signatures not found for {address}")
+                await self._cache_result(cache_key, False)
+                return False
+
+            # Step 3: Verify contract metadata
+            pool_metadata = await self.get_pool_metadata(address)
+            if not pool_metadata:
+                self.logger.info(f"Could not get pool metadata for {address}")
+                await self._cache_result(cache_key, False)
+                return False
+
+            # Step 4: Validate fee tier
+            if not self._is_valid_fee_tier(pool_metadata['fee']):
+                self.logger.info(f"Invalid fee tier {pool_metadata['fee']} for {address}")
+                await self._cache_result(cache_key, False)
+                return False
+
+            # Step 5: Additional validation - check tick spacing
+            if not self._is_valid_tick_spacing(pool_metadata['fee'], pool_metadata.get('tick_spacing')):
+                self.logger.info(f"Invalid tick spacing for fee {pool_metadata['fee']} for {address}")
+                await self._cache_result(cache_key, False)
+                return False
+
+            # TODO: Remove this WETH filter once testing is complete
+            token0_addr = pool_metadata['token0']['address']
+            token1_addr = pool_metadata['token1']['address']
+            if token0_addr != self.weth_address and token1_addr != self.weth_address:
+                self.logger.info(f"Neither token0 nor token1 is WETH for {address}")
+                await self._cache_result(cache_key, False)
+                return False
+
+            # All checks passed
+            self.logger.info(f"Successfully verified {address} as UniswapV3Pool")
+            await self._cache_result(cache_key, True)
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error checking if {address} is a UniswapV3Pool contract: {str(e)}")
+            await self._cache_result(cache_key, False)
+            return False
+
+    async def _has_contract_code(self, address: str) -> bool:
+        """Check if the address has contract bytecode."""
+        try:
+            bytecode = await self.web3.eth.get_code(address)
+            return bytecode and bytecode != '0x' and bytecode != HexStr('0x')
+        except Exception as e:
+            self.logger.error(f"Error getting bytecode for {address}: {str(e)}")
+            return False
+
+    async def _has_required_function_signatures(self, address: str) -> bool:
+        """Check if the contract bytecode contains required function signatures."""
+        try:
+            bytecode = await self.web3.eth.get_code(address)
+            if not bytecode:
+                return False
+
+            # Convert to hex string without 0x prefix for searching
+            bytecode_hex = bytecode.hex().lower()
+
+            # Count matching function signatures
+            signature_matches = 0
+            for signature in self.REQUIRED_FUNCTION_SIGNATURES:
+                # Remove 0x prefix and search in bytecode
+                sig_hex = signature[2:].lower()
+                if sig_hex in bytecode_hex:
+                    signature_matches += 1
+
+            # Require at least 6 out of 9 signatures to be present
+            # This allows for some variations in contract implementations
+            required_matches = 6
+            success = signature_matches >= required_matches
+            
+            self.logger.info(f"Found {signature_matches} signatures in {address}")
+            
+            return success
+
+        except Exception as e:
+            self.logger.error(f"Error checking function signatures for {address}: {str(e)}")
+            return False
+
+    def _is_valid_fee_tier(self, fee: int) -> bool:
+        """Check if the fee is a valid Uniswap V3 fee tier."""
+        return isinstance(fee, int) and fee in self.VALID_FEE_TIERS
+
+    def _is_valid_tick_spacing(self, fee: int, tick_spacing: int) -> bool:
+        """Check if tick spacing matches the expected value for the fee tier."""
+        if not isinstance(tick_spacing, int):
+            return False
+            
+        # Expected tick spacing for each fee tier
+        expected_tick_spacing = {
+            100: 1,
+            500: 10,
+            3000: 60,
+            10000: 200
+        }
+        
+        return expected_tick_spacing.get(fee) == tick_spacing
+
+    async def _cache_result(self, cache_key: str, result: bool) -> None:
+        """Cache the verification result."""
+        try:
+            await self.redis.set(cache_key, json.dumps(result), ex=3600)  # 1 hour cache
+        except Exception as e:
+            self.logger.warning(f"Failed to cache result: {str(e)}")
+
+    async def get_pool_metadata(self, pool_address: Union[str, Address]) -> Dict[str, Any]:
+        """Get comprehensive metadata from a UniswapV3Pool.
+
+        Args:
+            pool_address: The address of the UniswapV3Pool contract
+
+        Returns:
+            Dict containing pool metadata or None if not a valid pool
+        """
+        try:
+            pool_address = Web3.to_checksum_address(pool_address)
+
+            # Check cache first
+            cache_key = f'pool_metadata:{pool_address}'
+            cached_data = await self.redis.get(cache_key)
+            if cached_data:
+                return json.loads(cached_data)
+
+            # Create pool contract instance
+            pool_contract = self.web3.eth.contract(address=pool_address, abi=self.POOL_ABI)
+
+            # Get basic pool data
+            try:
+                token0_address = await pool_contract.functions.token0().call()
+                token1_address = await pool_contract.functions.token1().call()
+                factory_address = await pool_contract.functions.factory().call()
+                fee = await pool_contract.functions.fee().call()
+                tick_spacing = await pool_contract.functions.tickSpacing().call()
+            except Exception as e:
+                self.logger.error(f"Failed to get basic pool data for {pool_address}: {str(e)}")
+                return None
+
+            # Normalize addresses
+            token0_address = Web3.to_checksum_address(token0_address)
+            token1_address = Web3.to_checksum_address(token1_address)
+            factory_address = Web3.to_checksum_address(factory_address)
+
+            # Get token metadata
+            token0_metadata = await self._get_erc20_metadata(token0_address)
+            token1_metadata = await self._get_erc20_metadata(token1_address)
+
+            if not token0_metadata or not token1_metadata:
+                self.logger.error(f"Failed to get token metadata for pool {pool_address}")
+                return None
+
+            # Build metadata
+            pool_metadata = {
+                'address': pool_address,
+                'token0': {
+                    'address': token0_address,
+                    **token0_metadata
+                },
+                'token1': {
+                    'address': token1_address,
+                    **token1_metadata
+                },
+                'fee': fee,
+                'tick_spacing': tick_spacing,
+                'factory': factory_address
+            }
+
+            # Cache the result
+            await self.redis.set(cache_key, json.dumps(pool_metadata), ex=3600)
+            return pool_metadata
+
+        except Exception as e:
+            self.logger.error(f"Error getting pool metadata for {pool_address}: {str(e)}")
+            return None
+
+    async def _get_erc20_metadata(self, token_address: Union[str, Address]) -> Dict[str, Any]:
+        """Get ERC20 token metadata with robust error handling."""
+        try:
+            token_address = Web3.to_checksum_address(token_address)
+
+            # Check cache first
+            cache_key = f'erc20_metadata:{token_address}'
+            cached_data = await self.redis.get(cache_key)
+            if cached_data:
+                return json.loads(cached_data)
+
+            # Create token contract
+            token_contract = self.web3.eth.contract(address=token_address, abi=self.ERC20_ABI)
+
+            # Get metadata with fallbacks
+            try:
+                name = await token_contract.functions.name().call()
+            except Exception:
+                name = "Unknown Token"
+
+            try:
+                symbol = await token_contract.functions.symbol().call()
+            except Exception:
+                symbol = "UNKNOWN"
+
+            try:
+                decimals = await token_contract.functions.decimals().call()
+            except Exception:
+                decimals = 18  # Default to 18 decimals
+
+            metadata = {
+                'name': name,
+                'symbol': symbol,
+                'decimals': decimals
+            }
+
+            # Cache for 24 hours
+            await self.redis.set(cache_key, json.dumps(metadata), ex=86400)
+            return metadata
+
+        except Exception as e:
+            self.logger.error(f"Error getting ERC20 metadata for {token_address}: {str(e)}")
+            return None
+
+    def get_key_event_topics(self) -> List[str]:
+        """Get the list of event topic signatures characteristic of UniswapV3Pool contracts."""
+        return [
+            '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67',  # Swap
+            '0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde',  # Mint
+            '0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c',  # Burn
+            '0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633',  # Flash
+        ]
+
+
+
+================================================
+FILE: utils/models/data_models.py
+================================================
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any
+
+
+class AddressSource(BaseModel):
+    config_file: str
+
+
+class EventFilterDefinition(BaseModel):
+    filter_name: str
+    abi_path: str
+    event_topics: List[str] = Field(..., min_items=1)
+    redis_key_pattern: str
+
+
+class EventFiltersConfig(BaseModel):
+    filters: List[EventFilterDefinition]
+
+
+class ProcessedEventDetail(BaseModel):
+    name: str
+    abi: Dict[str, Any] # The event ABI dictionary
+
+
+class ProcessedFilterData(BaseModel):
+    # Keys are standard 0x-prefixed, lowercase topic hashes
+    events_by_topic: Dict[str, ProcessedEventDetail]
+    redis_key_pattern: str
+
+
+================================================
+FILE: utils/models/settings_model.py
+================================================
+from pydantic import BaseModel, Field, validator
+from rpc_helper.utils.models.settings_model import RPCConfigBase
+from typing import Union, List, Dict, Optional
+
+class RedisDataRetentionConfig(BaseModel):
+    """Redis data retention configuration model."""
+    max_blocks: int
+    ttl_seconds: int
+
+class Redis(BaseModel):
+    """Redis configuration model."""
+    host: str
+    port: int
+    db: int
+    password: Union[str, None] = None
+    ssl: bool = False
+    cluster_mode: bool = False
+    data_retention: RedisDataRetentionConfig
+
+class Logs(BaseModel):
+    """Logging configuration model."""
+    debug_mode: bool = False
+    write_to_files: bool = True
+    level: str = "INFO"
+
+class TxProcessorConfig(BaseModel):
+    """Transaction Processor specific configuration."""
+    redis_queue_key: str = 'pending_transactions'
+    redis_block_timeout: int = 0  # 0 for blocking indefinitely
+
+class Settings(BaseModel):
+    """Main settings configuration model."""
+    rpc: RPCConfigBase
+    redis: Redis
+    logs: Logs
+    processor: TxProcessorConfig
+    namespace: str
+    weth_address: str
+
+class Preloader(BaseModel):
+    """Preloader configuration model."""
+    task_type: str
+    module: str
+    class_name: str
+
+class PreloaderConfig(BaseModel):
+    """Preloader configuration model."""
+    preloaders: List[Preloader]
+
+
+
+================================================
+FILE: utils/preloaders/__init__.py
+================================================
+from .base import TxPreloaderHook
+from .event_filter import EventFilter
+
+__all__ = ["TxPreloaderHook", "EventFilter"] 
+
+
+================================================
+FILE: utils/preloaders/base.py
+================================================
+from abc import ABC, abstractmethod
+from typing import Dict, Any
+
+class TxPreloaderHook(ABC):
+    """Base class for transaction receipt preloader hooks."""
+    
+    async def init(self) -> None:
+        """Initialize the preloader hook."""
+        pass
+    
+    @abstractmethod
+    async def process_receipt(self, tx_hash: str, receipt: Dict[str, Any], namespace: str) -> None:
+        """Process a transaction receipt after it's fetched.
+        
+        Args:
+            tx_hash: The transaction hash
+            receipt: The transaction receipt dictionary from the RPC
+            namespace: The current service namespace
+        """
+        pass
+
+
+
+================================================
+FILE: utils/preloaders/event_filter.py
+================================================
+import json
+from pathlib import Path
+from typing import Dict, Any, List
+from web3._utils.events import get_event_data
+from eth_utils.abi import event_abi_to_log_topic
+from eth_abi.codec import ABICodec
+from eth_abi.registry import registry as default_abi_registry
+from utils.code_detectors import UniswapV3PoolDetector
+from .base import TxPreloaderHook
+from config.loader import get_event_filter_config
+from utils.models.data_models import ProcessedFilterData, ProcessedEventDetail 
+from utils.logging import logger
+from utils.redis.redis_conn import RedisPool
+from web3 import Web3, AsyncHTTPProvider
+from web3.eth import AsyncEth
+from config.loader import get_core_config
+from redis import asyncio as aioredis
+
+
+class EventFilter(TxPreloaderHook):
+    """Filters transaction logs based on configured event topics and addresses."""
+
+    def __init__(self):
+        self._logger = logger.bind(module='EventFilterHook')
+        self.filters_config = get_event_filter_config()
+        self.processed_filters: Dict[str, ProcessedFilterData] = {}
+        self._prepare_filters()
+        self.settings = get_core_config()
+
+        self.codec = ABICodec(default_abi_registry)
+        self.detected_pool_addresses: Dict[str, bool] = {}
+
+    def _get_web3_instance(self) -> Web3:
+        """Get a Web3 instance using the RPC URL from settings.
+        
+        Returns:
+            Web3: A configured Web3 instance
+        """
+        if hasattr(self, '_web3_instance'):
+            return self._web3_instance
+        
+        provider = AsyncHTTPProvider(self.settings.rpc.full_nodes[0].url)
+        self._web3_instance = Web3(provider)
+        self._web3_instance.eth = AsyncEth(self._web3_instance)
+        
+        return self._web3_instance
+        
+    async def _get_redis_pool(self):
+        """Get Redis connection pool.
+        
+        Returns:
+            Redis: A Redis connection instance
+        """
+        return await RedisPool.get_pool()
+    
+    async def _update_active_tokens_and_pool(self, token_addresses: List[str], pool_address: str, redis: aioredis.Redis, block_number: int, namespace: str):
+        """Update the active tokens in Redis using a sorted set.
+
+        This method maintains a sorted set of active tokens where:
+        - The score represents the number of times a token has appeared in pools
+        - Tokens are automatically sorted by their frequency
+
+        Args:
+            token_addresses: List of token addresses to update
+        """
+        pipeline = redis.pipeline()
+            
+        pipeline.sadd(f'token_pools:{token_addresses[0]}', pool_address)
+        pipeline.sadd(f'token_pools:{token_addresses[1]}', pool_address)
+            
+        pipeline.sadd(f"active_pools:{block_number}:{namespace}", pool_address)
+        pipeline.zincrby(f"active_pools_per_block:{block_number}:{namespace}", 1, pool_address)
+        pipeline.zincrby(f"active_tokens_per_block:{block_number}:{namespace}", 1, token_addresses[0])
+        pipeline.zincrby(f"active_tokens_per_block:{block_number}:{namespace}", 1, token_addresses[1])
+        
+        # remove active pools for current_block - 60
+        pipeline.delete(f"active_pools:{block_number-60}:{namespace}")
+        pipeline.delete(f"active_pools_per_block:{block_number-60}:{namespace}")
+        pipeline.delete(f"active_tokens_per_block:{block_number-60}:{namespace}")
+
+        await pipeline.execute()
+            
+    async def is_uniswap_v3_pool(self, address: str) -> bool:
+        """Check if the given address is a UniswapV3Pool contract.
+        
+        Args:
+            address: The address to check
+            
+        Returns:
+            bool: True if the address is a UniswapV3Pool contract, False otherwise
+        """        
+        if address in self.detected_pool_addresses:
+            return self.detected_pool_addresses[address]
+
+        # Retry up to 3 times before marking as non-pool
+        retry_count = 3
+        for attempt in range(retry_count):
+            try:
+                
+                is_pool = await self._uniswap_v3_detector.is_uniswap_v3_pool(address)
+                if is_pool:
+                    self.detected_pool_addresses[address] = True
+                    return True
+                # Only continue retrying on failure
+            except Exception as e:
+                self._logger.warning(
+                    f"Attempt {attempt + 1}/{retry_count} failed for {address}: {e}", 
+                    exc_info=True
+                )
+                if attempt == retry_count - 1:
+                    # Log the final failure
+                    self._logger.error(
+                        f"All {retry_count} attempts failed to detect pool status for {address}", 
+                        exc_info=True
+                    )
+        
+        # After all retries failed
+        self.detected_pool_addresses[address] = False
+        return False
+    
+    def _prepare_filters(self):
+        """Load ABIs, find event ABIs matching configured topics, and store processed filter info."""
+        workspace_root = Path(__file__).parent.parent.parent.parent
+
+        loaded_abis: Dict[str, List[Dict[str, Any]]] = {}
+
+        for filter_def in self.filters_config.filters:
+            try:
+                abi_path_str = filter_def.abi_path
+                if not abi_path_str.startswith('/'):
+                    abi_path = (workspace_root / abi_path_str).resolve()
+                else:
+                    abi_path = Path(abi_path_str)
+
+                self._logger.info(f"🔧 Processing filter '{filter_def.filter_name}': ABI at {abi_path}")
+
+                if str(abi_path) not in loaded_abis:
+                    if not abi_path.exists():
+                        self._logger.error(f"  ❌ ABI file not found: {abi_path}")
+                        raise RuntimeError(f"ABI file '{abi_path}' not found for filter '{filter_def.filter_name}'.")
+                    try:
+                        with open(abi_path, 'r') as f:
+                            loaded_abis[str(abi_path)] = json.load(f)
+                            self._logger.debug(f"  📂 Loaded ABI from {abi_path}")
+                    except json.JSONDecodeError as e:
+                        self._logger.error(f"  ❌ Error decoding ABI file '{abi_path}': {e}")
+                        raise RuntimeError(f"Error decoding ABI file '{abi_path}': {e}")
+
+                abi = loaded_abis[str(abi_path)]
+
+                config_topics_set = set()
+                for topic in filter_def.event_topics:
+                    normalized_topic = topic.lower()
+                    if not normalized_topic.startswith('0x'):
+                        normalized_topic = '0x' + normalized_topic
+                    config_topics_set.add(normalized_topic)
+
+                self._logger.info(f"  🔍 Will look for {len(config_topics_set)} standard configured topics: {config_topics_set}")
+
+                target_event_details: Dict[str, ProcessedEventDetail] = {}
+                all_event_abis = [item for item in abi if item.get('type') == 'event']
+
+                for event_abi_item in all_event_abis:
+                    try:
+                        calculated_topic_hash_bytes = event_abi_to_log_topic(event_abi_item)
+                        standard_calculated_hash = '0x' + calculated_topic_hash_bytes.hex().lower()
+
+                        if standard_calculated_hash in config_topics_set:
+                            event_name = event_abi_item.get('name', 'UnnamedEvent')
+                            self._logger.info(f"  ✔️ Matched ABI event '{event_name}' to configured topic (hash: {standard_calculated_hash})")
+                            target_event_details[standard_calculated_hash] = ProcessedEventDetail(
+                                name=event_name,
+                                abi=event_abi_item
+                            )
+                    except Exception as abi_calc_err:
+                        self._logger.warning(f"  ⚠️ Error processing ABI item: {event_abi_item.get('name', '?')} - {abi_calc_err}")
+                        continue
+
+                found_topics = set(target_event_details.keys())
+                missing_topics = config_topics_set - found_topics
+                for missing in missing_topics:
+                    self._logger.warning(f"  ⚠️ Configured topic {missing} not found in ABI {abi_path} for filter '{filter_def.filter_name}'")
+
+                if not target_event_details:
+                    self._logger.error(f"  ❌ No valid event ABIs found for any configured topics in filter '{filter_def.filter_name}', skipping this filter.")
+                    continue
+
+                self.processed_filters[filter_def.filter_name] = ProcessedFilterData(
+                    events_by_topic=target_event_details,
+                    redis_key_pattern=filter_def.redis_key_pattern
+                )
+                self._logger.success(f"  👍 Filter '{filter_def.filter_name}' prepared successfully.")
+
+            except Exception as e:
+                self._logger.error(f"💥 Failed to prepare filter '{filter_def.filter_name}': {type(e).__name__} - {e}")
+
+    async def process_receipt(self, tx_hash: str, receipt: Dict[str, Any], namespace: str) -> None:
+        """Process logs in a transaction receipt, decode events matching filters, and store in Redis ZSets (one per address)."""
+        if not receipt or 'logs' not in receipt or not isinstance(receipt.get('logs'), list) or not receipt['logs']:
+            return
+
+        try:
+            web3 = self._get_web3_instance()
+            redis = await self._get_redis_pool()
+            weth_address = self.settings.weth_address
+            if not hasattr(self, '_uniswap_v3_detector'):
+                self._uniswap_v3_detector = UniswapV3PoolDetector(web3, redis, weth_address)
+            
+            block_number_hex = receipt.get('blockNumber')
+            tx_index_hex = receipt.get('transactionIndex')
+            if block_number_hex is None or tx_index_hex is None:
+                self._logger.warning(f"Missing blockNumber or transactionIndex in receipt for tx {tx_hash}")
+                return
+
+            block_number = int(block_number_hex, 16)
+            tx_index = int(tx_index_hex, 16)
+
+        except Exception as init_err:
+            self._logger.error(f"Error during initial setup for tx {tx_hash}: {init_err}")
+            return
+
+        # Define a multiplier for the composite score (block_number dominates log_index)
+        SCORE_BLOCK_MULTIPLIER = 1_000_000
+
+        # Group ZADD commands by key (address)
+        # Structure: {redis_key: {member1: score1, member2: score2, ...}}
+        commands_by_key: Dict[str, Dict[str, int]] = {}
+        found_events_count = 0
+
+        for log_entry in receipt['logs']:
+            try:
+                log_address = log_entry.get('address')
+                log_topics = log_entry.get('topics')
+                log_index_hex = log_entry.get('logIndex')
+
+                if not log_address or not log_topics or log_index_hex is None:
+                    self._logger.trace(f"Skipping invalid log entry in tx {tx_hash}: {log_entry}")
+                    continue
+
+                log_topic0_hex = log_topics[0].hex() if hasattr(log_topics[0], 'hex') else str(log_topics[0])
+                log_topic0_standard = ('0x' + log_topic0_hex.lower().lstrip('0x'))
+                log_index = int(log_index_hex, 16)
+                log_check_address = Web3.to_checksum_address(log_address)
+
+                for filter_name, processed_filter in self.processed_filters.items():
+                    if log_topic0_standard in processed_filter.events_by_topic:
+                        if await self.is_uniswap_v3_pool(log_check_address):
+                            # Check cache first
+                            pool_metadata = await self._uniswap_v3_detector.get_pool_metadata(log_check_address)
+                            token0_address = Web3.to_checksum_address(pool_metadata['token0']['address'])
+                            token1_address = Web3.to_checksum_address(pool_metadata['token1']['address'])
+                            await self._update_active_tokens_and_pool([token0_address, token1_address], log_check_address, redis, block_number, namespace)
+
+                            # add pool address to the list of pools active for that block
+
+                            event_details = processed_filter.events_by_topic[log_topic0_standard]
+                            event_abi = event_details.abi
+                            event_name = event_details.name
+
+                            try:
+                                # Use the class codec
+                                decoded_event = get_event_data(self.codec, event_abi, log_entry)
+
+                                # Calculate composite score
+                                score = (block_number * SCORE_BLOCK_MULTIPLIER) + tx_index
+
+                                # Prepare key (per address) and member for Redis ZSet
+                                redis_key = processed_filter.redis_key_pattern.format(
+                                    namespace=namespace,
+                                    address=log_check_address
+                                )
+
+                                # Member is the JSON string of event details
+                                event_data_to_store = {
+                                    'eventName': event_name,
+                                    'filterName': filter_name,
+                                    'txHash': tx_hash,
+                                    'blockNumber': block_number,
+                                    'txIndex': tx_index,
+                                    'logIndex': log_index,
+                                    'address': log_address,
+                                    'topics': ['0x' + (t.hex() if hasattr(t, 'hex') else str(t)).lstrip('0x').lower() for t in log_topics],
+                                    'data': log_entry.get('data', ''),
+                                    'args': dict(decoded_event['args']),
+                                    '_score': score  # Keep score in data for reference if needed
+                                }
+                                member = json.dumps(event_data_to_store)
+
+                                # Group ZADD commands by key, using {member: score} mapping
+                                if redis_key not in commands_by_key:
+                                    commands_by_key[redis_key] = {}
+
+                                commands_by_key[redis_key][member] = score
+                                found_events_count += 1
+                                log_msg = (f"  -> Matched event '{event_name}' from filter '{filter_name}' "
+                                          f"in tx {tx_hash} (LogIndex: {log_index}). Score: {score}")
+                                self._logger.debug(log_msg)
+
+                            except Exception as decode_err:
+                                self._logger.error(
+                                    f"💥 Error decoding/processing event '{event_name}' (topic: {log_topic0_standard}) "
+                                    f"for filter '{filter_name}' in tx {tx_hash} (LogIndex: {log_index}): {decode_err}"
+                                )
+            except Exception as log_proc_err:
+                self._logger.error(f"💥 Unexpected error processing log entry in tx {tx_hash}: {log_proc_err} | Log: {log_entry}")
+                continue
+
+        if found_events_count > 0:
+            try:
+                pipeline = redis.pipeline(transaction=False)
+                for r_key, member_score_map in commands_by_key.items():
+                    pipeline.zadd(r_key, mapping=member_score_map)
+                    max_score_to_remove_inclusive = ((block_number - 19) * SCORE_BLOCK_MULTIPLIER) - 1
+                    pipeline.zremrangebyscore(r_key, '-inf', max_score_to_remove_inclusive)
+
+                await pipeline.execute()
+                self._logger.success(f"💾 Stored {found_events_count} filtered events from tx {tx_hash} into Redis ZSets (Key: {list(commands_by_key.keys())}) and pruned entries older than 20 blocks.")
+            except Exception as redis_err:
+                self._logger.error(f"❌ Failed to store/prune filtered events from tx {tx_hash} to Redis: {redis_err}")
+
+
+
+================================================
+FILE: utils/preloaders/manager.py
+================================================
+import importlib
+from typing import List
+from utils.models.settings_model import PreloaderConfig
+from utils.logging import logger
+from .base import TxPreloaderHook
+
+class PreloaderManager:
+    _logger = logger.bind(module='PreloaderManager')
+
+    @classmethod
+    def load_hook(cls, preloader_config) -> TxPreloaderHook:
+        """Load a single preloader hook."""
+        cls._logger.info(f"📥 Loading preloader hook: {preloader_config.class_name}")
+        try:
+            module = importlib.import_module(preloader_config.module)
+            hook_class = getattr(module, preloader_config.class_name)
+            hook = hook_class()
+            cls._logger.success(f"✅ Successfully loaded {preloader_config.class_name}")
+            return hook
+        except Exception as e:
+            cls._logger.error(f"❌ Failed to load {preloader_config.class_name}: {e}")
+            raise ValueError(f"Failed to load preloader hook {preloader_config.class_name}: {e}")
+
+    @classmethod
+    def load_hooks(cls, config: PreloaderConfig) -> List[TxPreloaderHook]:
+        """Load all preloader hooks from config."""
+        cls._logger.info(f"📦 Loading {len(config.preloaders)} preloader hooks")
+        return [cls.load_hook(preloader) for preloader in config.preloaders] 
+
+
+================================================
+FILE: utils/preloaders/receipt_dumper.py
+================================================
+import json
+from typing import Dict, Any
+from .base import TxPreloaderHook
+from utils.redis.data_manager import RedisDataManager
+from config.loader import get_core_config
+
+class ReceiptDumper(TxPreloaderHook):
+    """Default hook that dumps transaction receipt to Redis."""
+    
+    def __init__(self):
+        self.settings = get_core_config()
+        self.data_manager = RedisDataManager(self.settings.redis.data_retention)
+    
+    async def init(self):
+        """Initialize the data manager."""
+        await self.data_manager.init()
+    
+    async def process_receipt(self, tx_hash: str, receipt: Dict[str, Any], namespace: str) -> None:
+        # Convert hex block number to int
+        block_number = int(receipt['blockNumber'], 16)
+        # Store receipt in block-tx mapping
+        await self.data_manager.add_receipt(
+            namespace,
+            block_number,
+            tx_hash,
+            json.dumps(receipt)
+        )
+    
+    async def close(self):
+        """Cleanup resources."""
+        await self.data_manager.close()
+
+
+
+================================================
+FILE: utils/redis/data_manager.py
+================================================
+from typing import Optional, Dict, Any, Union, Awaitable
+import redis.asyncio as aioredis
+from utils.logging import logger
+from utils.models.settings_model import RedisDataRetentionConfig
+from utils.redis.redis_conn import RedisPool
+from utils.redis.redis_keys import block_tx_htable_key
+
+class RedisDataManager:
+    """Manages Redis data retention and cleanup."""
+    
+    def __init__(self, retention_config: RedisDataRetentionConfig):
+        self.retention_config = retention_config
+        self._redis: Optional[aioredis.Redis] = None
+        self._logger = logger.bind(module='RedisDataManager')
+        self._last_cleanup_block = 0
+        # Cleanup interval is 10% of max_blocks, but at least 10 blocks
+        self._cleanup_interval = max(10, self.retention_config.max_blocks // 10)
+        self._logger.info(
+            f"Initialized RedisDataManager with max_blocks={retention_config.max_blocks}, "
+            f"cleanup_interval={self._cleanup_interval}"
+        )
+
+    async def init(self) -> None:
+        """Initialize Redis connection."""
+        self._redis = await RedisPool.get_pool()
+
+    async def set_with_ttl(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        """Set a key with TTL."""
+        if not self._redis:
+            return
+
+        ttl = ttl or self.retention_config.ttl_seconds
+        await self._redis.set(key, value, ex=ttl)
+
+    async def add_receipt(self, namespace: str, block_number: int, tx_hash: str, receipt: str) -> None:
+        """Add a transaction receipt."""
+        if not self._redis:
+            return
+        key = block_tx_htable_key(namespace, block_number)
+        await self._redis.hset(key, tx_hash, receipt)
+        self._logger.info("🗄️ Added receipt to redis: {}", tx_hash)
+
+    async def get_receipt(self, namespace: str, block_number: int, tx_hash: str) -> Optional[str]:
+        """Get a transaction receipt."""
+        if not self._redis:
+            return None
+        key = block_tx_htable_key(namespace, block_number)
+        result = await self._redis.hget(key, tx_hash)
+        if result is None:
+            return None
+        return str(result)
+
+    async def close(self) -> None:
+        """Cleanup resources."""
+        pass 
+
+
+================================================
+FILE: utils/redis/redis_conn.py
+================================================
+import redis.asyncio as aioredis
+from config.loader import get_core_config # Adjusted import path
+from utils.logging import logger # Adjusted import path
+import asyncio
+from typing import Optional
+
+class RedisPool:
+    _pool: Optional[aioredis.Redis] = None
+    _lock = asyncio.Lock()
+
+    def __init__(self):
+        # Private constructor to prevent direct instantiation
+        self.settings = get_core_config()
+        self._logger = logger.bind(module='RedisPool')
+
+    @classmethod
+    async def get_pool(cls) -> aioredis.Redis:
+        """Get or create Redis connection pool."""
+        if cls._pool is None:
+            async with cls._lock:
+                # Double-check locking
+                if cls._pool is None:
+                    instance = cls()
+                    redis_settings = instance.settings.redis
+                    redis_url = f"redis{'s' if redis_settings.ssl else ''}://{':' + redis_settings.password + '@' if redis_settings.password else ''}{redis_settings.host}:{redis_settings.port}/{redis_settings.db}"
+                    try:
+                        instance._logger.info(f"Creating Redis connection pool for {redis_settings.host}:{redis_settings.port}/{redis_settings.db}")
+                        cls._pool = await aioredis.from_url(
+                            redis_url,
+                            encoding="utf-8",
+                            decode_responses=True,
+                            # max_connections=100 # Adjust pool size if needed
+                        )
+                        # Test connection
+                        await cls._pool.ping()
+                        instance._logger.success("✅ Successfully connected to Redis.")
+                    except Exception as e:
+                        instance._logger.error(f"💥 Failed to connect to Redis at {redis_url}: {e}")
+                        raise ConnectionError(f"Failed to initialize Redis pool: {e}") from e
+        return cls._pool
+
+    @classmethod
+    async def close(cls):
+        """Close the Redis connection pool."""
+        if cls._pool:
+            logger.info("Closing Redis connection pool...")
+            await cls._pool.close()
+            # await cls._pool.connection_pool.disconnect() # For older redis versions
+            cls._pool = None
+            logger.info("Redis connection pool closed.")
+
+
+================================================
+FILE: utils/redis/redis_keys.py
+================================================
+def block_tx_htable_key(namespace: str, block_number: int) -> str:
+    return f'block_txs:{block_number}:{namespace}'
+
+
+
