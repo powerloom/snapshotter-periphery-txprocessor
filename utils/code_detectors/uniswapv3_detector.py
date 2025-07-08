@@ -181,14 +181,6 @@ class UniswapV3PoolDetector:
                 await self._cache_result(cache_key, False)
                 return False
 
-            # TODO: Remove this WETH filter once testing is complete
-            token0_addr = pool_metadata['token0']['address']
-            token1_addr = pool_metadata['token1']['address']
-            if token0_addr != self.weth_address and token1_addr != self.weth_address:
-                self.logger.info(f"Neither token0 nor token1 is WETH for {address}")
-                await self._cache_result(cache_key, False)
-                return False
-
             # All checks passed
             self.logger.info(f"Successfully verified {address} as UniswapV3Pool")
             await self._cache_result(cache_key, True)
