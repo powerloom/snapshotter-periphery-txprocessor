@@ -238,7 +238,7 @@ class EventFilter(TxPreloaderHook):
                     continue
 
                 log_topic0_hex = log_topics[0].hex() if hasattr(log_topics[0], 'hex') else str(log_topics[0])
-                log_topic0_standard = ('0x' + log_topic0_hex.lower().lstrip('0x'))
+                log_topic0_standard = ('0x' + log_topic0_hex.lower().replace('0x', ''))
                 log_index = int(log_index_hex, 16)
                 log_check_address = Web3.to_checksum_address(log_address)
 
