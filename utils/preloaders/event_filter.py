@@ -270,6 +270,8 @@ class EventFilter(TxPreloaderHook):
                                     address=log_check_address
                                 )
 
+                                topics = ['0x' + (t.hex() if hasattr(t, 'hex') else str(t)).replace('0x', '').lower() for t in log_topics]
+
                                 # Member is the JSON string of event details
                                 event_data_to_store = {
                                     'eventName': event_name,
@@ -279,7 +281,7 @@ class EventFilter(TxPreloaderHook):
                                     'txIndex': tx_index,
                                     'logIndex': log_index,
                                     'address': log_address,
-                                    'topics': ['0x' + (t.hex() if hasattr(t, 'hex') else str(t)).lstrip('0x').lower() for t in log_topics],
+                                    'topics': topics,
                                     'data': log_entry.get('data', ''),
                                     'args': dict(decoded_event['args']),
                                     '_score': score  # Keep score in data for reference if needed
