@@ -72,6 +72,8 @@ class TxProcessor:
                         await self._redis.delete(self.queue_key)
                         self._logger.info("🔄 Cleared entire queue")
                         return
+                    else:
+                        self._logger.info(f"🔄 Transaction {tx_hash} is not more than 100 blocks old")
                 # Run all preloader hooks
                 for hook in self.preloader_hooks:
                     try:
