@@ -5,7 +5,7 @@ from rpc_helper.rpc import RpcHelper
 from utils.models.settings_model import Settings
 from utils.redis.redis_conn import RedisPool
 from utils.logging import logger
-import json
+import random
 from config.loader import get_preloader_config, PRELOADER_CONFIG_FILE
 from utils.preloaders.manager import PreloaderManager
 import os
@@ -61,6 +61,17 @@ class TxProcessor:
             if receipt:
                 self._logger.success(f"✅ Successfully fetched receipt for {tx_hash}")
                 
+                # 10% chance to perform the old-block check and queue clear
+                if random.random() < 0.1:
+                    current_block_number = await self.rpc_helper.get_current_block_number()
+                    # check if transaction is more than 100 blocks old
+                    receipt_block_number = int(receipt['blockNumber'], 16)  # Convert hex to int
+                    if current_block_number - receipt_block_number > 100:
+                        self._logger.warning(f"⚠️ Transaction {tx_hash} is more than 100 blocks old!")
+                        # empty the entire queue
+                        await self._redis.delete(self.queue_key)
+                        self._logger.info("🔄 Cleared entire queue")
+                        return
                 # Run all preloader hooks
                 for hook in self.preloader_hooks:
                     try:
