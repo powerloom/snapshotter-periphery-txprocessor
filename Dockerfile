@@ -28,6 +28,8 @@ RUN mkdir logs
 # Copy application code (ensure all needed dirs like utils, config, scripts are copied)
 COPY . .
 
+RUN git clone --branch bds_eth_uniswapv3_core --single-branch --depth 1 https://github.com/powerloom/snapshotter-computes /computes
+
 # Make entrypoint script executable
 RUN chmod +x scripts/entrypoint.py
 
