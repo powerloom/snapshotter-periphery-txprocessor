@@ -64,8 +64,10 @@ class TxProcessor:
                 # 10% chance to perform the old-block check and queue clear
                 if random.random() < 0.1:
                     current_block_number = await self.rpc_helper.get_current_block_number()
+                    self._logger.info(f"🔄 Current block number: {current_block_number}")
                     # check if transaction is more than 100 blocks old
                     receipt_block_number = int(receipt['blockNumber'], 16)  # Convert hex to int
+                    self._logger.info(f"🔄 Receipt block number: {receipt_block_number}")
                     if current_block_number - receipt_block_number > 100:
                         self._logger.warning(f"⚠️ Transaction {tx_hash} is more than 100 blocks old!")
                         # empty the entire queue
@@ -73,6 +75,7 @@ class TxProcessor:
                         self._logger.info("🔄 Cleared entire queue")
                         return
                     else:
+                        self._logger.info(f"🔄 Transaction {tx_hash} is {current_block_number - receipt_block_number} blocks old")
                         self._logger.info(f"🔄 Transaction {tx_hash} is not more than 100 blocks old")
                 # Run all preloader hooks
                 for hook in self.preloader_hooks:
