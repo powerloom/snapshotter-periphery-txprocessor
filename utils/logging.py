@@ -3,9 +3,8 @@ import sys
 from pathlib import Path
 from loguru import logger
 
-# Create logs directory if it doesn't exist
+# Logs directory (created on demand when file logging is enabled)
 LOGS_DIR = Path("logs")
-LOGS_DIR.mkdir(exist_ok=True)
 
 # Remove default logger
 logger.remove()
@@ -47,7 +46,7 @@ logger.add(
 def configure_file_logging(write_to_files: bool = True):
     """Configure file-based logging based on settings."""
     if write_to_files:
-        # Add file loggers for each severity level
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
         for level, filename in SEVERITY_FILES.items():
             logger.add(
                 LOGS_DIR / filename,

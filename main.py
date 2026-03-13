@@ -1,4 +1,5 @@
 import asyncio
+import os
 from config.loader import get_core_config
 from rpc_helper.rpc import RpcHelper
 from utils.tx_processor import TxProcessor
@@ -9,10 +10,11 @@ async def main():
     processor = None
     try:
         settings = get_core_config()
-        # Reconfigure logging with settings
-        configure_file_logging(
-            write_to_files=settings.logs.write_to_files,
-        )
+        # LOG_TO_FILES env overrides config (avoids template/coercion issues)
+        write_to_files = settings.logs.write_to_files
+        if (v := os.getenv("LOG_TO_FILES")) is not None:
+            write_to_files = str(v).strip().lower() in ("true", "1", "yes")
+        configure_file_logging(write_to_files=write_to_files)
         logger.info("🚀 Starting Transaction Processor Service...")
         processor = TxProcessor(settings)
         await processor.start_consuming()
